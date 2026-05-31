@@ -1,572 +1,231 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8"/>
-<title>Liquid Glass AR</title>
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
-<style>
-*{margin:0;padding:0;box-sizing:border-box;}
-html,body{
-  width:100%;height:100%;overflow:hidden;
-  background:#000;
-  font-family:system-ui,-apple-system,sans-serif;
-  touch-action:none;-webkit-user-select:none;user-select:none;
-}
-#wrap{position:fixed;inset:0;background:#000;}
-
-/* VIDEO: NO css transform at all — we handle orientation purely in JS/shader */
-video#cam{
-  position:absolute;inset:0;
-  width:100%;height:100%;
-  object-fit:cover;
-  background:#000;
-}
-canvas#gl{
-  position:absolute;inset:0;
-  width:100%;height:100%;
-  pointer-events:none;
-}
-#ui{position:absolute;inset:0;pointer-events:none;}
-#hint{
-  position:absolute;bottom:18%;left:50%;transform:translateX(-50%);
-  color:#fff;font-size:15px;padding:10px 18px;border-radius:999px;
-  background:rgba(0,0,0,0.55);backdrop-filter:blur(10px);
-  -webkit-backdrop-filter:blur(10px);
-  opacity:1;transition:opacity .7s;white-space:nowrap;pointer-events:none;
-}
-#hint.gone{opacity:0;}
-#btns{
-  position:absolute;right:14px;bottom:14px;
-  display:flex;flex-direction:column;gap:8px;pointer-events:auto;
-}
-button{
-  border:none;border-radius:999px;padding:10px 18px;
-  background:rgba(0,0,0,0.55);color:#fff;font-size:13px;
-  letter-spacing:.04em;text-transform:uppercase;
-  backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
-}
-button:active{background:rgba(255,255,255,.2);}
-#gate{
-  position:absolute;inset:0;z-index:20;
-  background:rgba(0,0,0,.8);color:#fff;
-  display:flex;align-items:center;justify-content:center;
-  flex-direction:column;gap:14px;text-align:center;
-  pointer-events:auto;
-}
-#gate p{font-size:16px;opacity:.8;max-width:280px;line-height:1.5;}
-#gate button{background:#fff;color:#000;font-size:15px;padding:12px 28px;}
-</style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Reality Distortion AR</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #video { display: none; }
+  </style>
 </head>
 <body>
-<div id="wrap">
-  <video id="cam" playsinline autoplay muted></video>
-  <canvas id="gl"></canvas>
-  <div id="ui">
-    <div id="hint">Show your hand to the camera</div>
-    <div id="btns">
-      <button id="flipBtn">Flip Camera</button>
-    </div>
-  </div>
-  <div id="gate">
-    <p>Tap to start — camera &amp; audio needed</p>
-    <button id="startBtn">Start</button>
-  </div>
-</div>
+<video id="video" autoplay playsinline></video>
+<canvas id="canvas"></canvas>
 
-<!-- ── VERTEX SHADER ───────────────────────────────────────────── -->
-<script id="vs" type="x-shader/x-vertex">
-attribute vec2 a_pos;
-varying vec2 v_uv;
-void main(){
-  // v_uv in [0,1]; bottom-left origin in WebGL
-  v_uv = a_pos * 0.5 + 0.5;
-  gl_Position = vec4(a_pos, 0.0, 1.0);
-}
-</script>
-
-<!-- ── FRAGMENT SHADER ────────────────────────────────────────── -->
-<script id="fs" type="x-shader/x-fragment">
-precision highp float;
-varying vec2 v_uv;
-
-uniform sampler2D u_tex;
-uniform vec2      u_res;       // canvas resolution
-uniform float     u_time;
-uniform int       u_count;     // total active centres
-
-// up to 20 lens centres (10 per hand × 2 hands)
-uniform vec2  u_centers[20];
-uniform float u_str[20];      // per-centre strength 0..1
-uniform vec2  u_vel;          // palm velocity (normalised, for stretch)
-
-// ── Metaball field ────────────────────────────────────────────
-// Returns a field value 0..n that represents "how close am I to
-// the hand shape". Uses smooth-minimum for organic blending.
-float smin(float a,float b,float k){
-  float h=max(k-abs(a-b),0.0)/k;
-  return min(a,b)-h*h*k*0.25;
-}
-
-float handField(vec2 uv){
-  float f=1000.0;
-  for(int i=0;i<20;i++){
-    if(i>=u_count)break;
-    float s=u_str[i];
-    if(s<0.001)continue;
-    float r=mix(0.0,0.18,s);           // radius scales with strength
-    float d=length(uv-u_centers[i])-r;
-    f=smin(f,d,0.04);                  // smooth-blend into one shape
-  }
-  return f; // negative = inside the blob
-}
-
-// ── Noise for ripple ─────────────────────────────────────────
-float hash(vec2 p){
-  p=fract(p*vec2(127.1,311.7));
-  p+=dot(p,p+19.19);
-  return fract(p.x*p.y);
-}
-float noise(vec2 p){
-  vec2 i=floor(p),f=fract(p);
-  f=f*f*(3.0-2.0*f);
-  float a=hash(i),b=hash(i+vec2(1,0)),
-        c=hash(i+vec2(0,1)),d=hash(i+vec2(1,1));
-  return mix(mix(a,b,f.x),mix(c,d,f.x),f.y);
-}
-
-// ── Main ─────────────────────────────────────────────────────
-void main(){
-  vec2 uv = v_uv;
-
-  // correct aspect for distance math
-  vec2 aspect = vec2(u_res.x/u_res.y, 1.0);
-  vec2 uvA = uv * aspect;
-
-  float field = handField(uvA / aspect); // field in texel space
-
-  // Signed distance: negative = inside, 0 = edge, positive = outside
-  // threshold for "inside membrane"
-  float threshold = 0.0;
-  float edgeWidth = 0.025;              // width of the shimmer band
-
-  // inside: strong refraction; outside: nothing
-  float inside  = smoothstep( edgeWidth, -0.04, field); // 1 inside
-  float edgeBand= smoothstep( edgeWidth,  0.0,  field) *
-                  smoothstep(-0.04,        0.0,  field); // 1 on edge only
-
-  if(inside < 0.001 && edgeBand < 0.001){
-    // completely outside — show raw camera
-    gl_FragColor = vec4(texture2D(u_tex, uv).rgb, 1.0);
-    return;
-  }
-
-  // ── Gradient of the field (for refraction direction) ─────
-  float eps = 0.003;
-  vec2 uvAe = uvA;
-  float gx = handField((uvAe+vec2(eps,0.0))/aspect) -
-              handField((uvAe-vec2(eps,0.0))/aspect);
-  float gy = handField((uvAe+vec2(0.0,eps))/aspect) -
-              handField((uvAe-vec2(0.0,eps))/aspect);
-  vec2 grad = vec2(gx, gy); // points outward from field
-
-  // pull INWARD = opposite of grad
-  vec2 pullDir = -normalize(grad + vec2(1e-6));
-
-  // magnitude: strongest deep inside the field
-  float pullMag = 0.12 * inside;
-
-  // add ripple near edge to simulate "trembling glass"
-  float rippleFreq = 40.0;
-  float rippleAmp  = 0.008 * edgeBand;
-  float ripple = sin(uv.y * rippleFreq + u_time * 6.0) *
-                 sin(uv.x * rippleFreq * 0.7 + u_time * 4.5);
-  vec2 rippleOff = vec2(ripple, ripple * 0.7) * rippleAmp;
-
-  // velocity stretch: smear offset slightly in hand-motion direction
-  vec2 stretch = u_vel * 0.06 * inside;
-
-  vec2 offset = pullDir * pullMag + rippleOff + stretch;
-
-  // ── Chromatic aberration ─────────────────────────────────
-  float ab = 0.018;
-  vec2 uvR = clamp(uv + offset * (1.0 + ab), 0.001, 0.999);
-  vec2 uvG = clamp(uv + offset,              0.001, 0.999);
-  vec2 uvB = clamp(uv + offset * (1.0 - ab), 0.001, 0.999);
-
-  vec3 base     = texture2D(u_tex, uv).rgb;
-  vec3 refracted = vec3(
-    texture2D(u_tex, uvR).r,
-    texture2D(u_tex, uvG).g,
-    texture2D(u_tex, uvB).b
-  );
-
-  vec3 color = mix(base, refracted, inside);
-
-  // ── Iridescent shimmer on edge ───────────────────────────
-  float t = u_time * 0.8;
-  float phase = (uv.x + uv.y) * 3.0;
-  vec3 iri = vec3(
-    0.6 + 0.4*sin(phase + t*1.1),
-    0.6 + 0.4*sin(phase + t*0.9 + 2.09),
-    0.6 + 0.4*sin(phase + t*1.3 + 4.19)
-  );
-  color += iri * edgeBand * 0.65;
-
-  // thin bright outline at the very edge
-  float outline = smoothstep(0.01,0.0,abs(field)) * 0.5;
-  color += vec3(outline);
-
-  gl_FragColor = vec4(color, 1.0);
-}
-</script>
-
-<!-- MediaPipe -->
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<!-- MediaPipe Hands -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
 
 <script>
-(function(){
-'use strict';
+// ─── SETUP ───────────────────────────────────────────────────────────────────
+const video   = document.getElementById('video');
+const canvas  = document.getElementById('canvas');
+const gl      = canvas.getContext('webgl2') || canvas.getContext('webgl');
 
-// ── DOM ─────────────────────────────────────────────────────
-const vid     = document.getElementById('cam');
-const cvs     = document.getElementById('gl');
-const flipBtn = document.getElementById('flipBtn');
-const hint    = document.getElementById('hint');
-const gate    = document.getElementById('gate');
-const startB  = document.getElementById('startBtn');
+canvas.width  = window.innerWidth;
+canvas.height = window.innerHeight;
 
-// ── State ───────────────────────────────────────────────────
-const MAX_HANDS    = 2;
-const LENS_PER     = 10;
-const MAX_CENTERS  = MAX_HANDS * LENS_PER;
-
-// landmark indices → lens centres
-const LENS_IDX = [8,12,16,20,4,7,11,15,0,9];
-
-let facingMode = 'environment'; // start rear camera
-let stream     = null;
-let streaming  = false;
-
-// per-hand state
-const hands_state = Array.from({length:MAX_HANDS}, ()=>({
-  alive    : false,
-  strength : 0,
-  lastSeen : 0,
-  centers  : Array(LENS_PER).fill([0.5,0.5]),
-  palmPrev : [0.5,0.5]
-}));
-
-const centersFlat  = new Float32Array(MAX_CENTERS * 2);
-const strengthsFlat= new Float32Array(MAX_CENTERS);
-let   velFlat      = new Float32Array(2); // palm velocity
-
-// ── WebGL ────────────────────────────────────────────────────
-let gl, prog;
-let a_pos,u_tex,u_res,u_time,u_count,u_centers,u_str,u_vel;
-let quadBuf, camTex;
-
-function initGL(){
-  gl = cvs.getContext('webgl',{alpha:false,antialias:true,
-                                powerPreference:'high-performance'});
-  if(!gl){ alert('WebGL unavailable'); return; }
-
-  function compile(type, src){
-    const s = gl.createShader(type);
-    gl.shaderSource(s, src);
-    gl.compileShader(s);
-    if(!gl.getShaderParameter(s, gl.COMPILE_STATUS))
-      throw new Error(gl.getShaderInfoLog(s));
-    return s;
-  }
-
-  const vs = compile(gl.VERTEX_SHADER,
-    document.getElementById('vs').textContent.trim());
-  const fs = compile(gl.FRAGMENT_SHADER,
-    document.getElementById('fs').textContent.trim());
-
-  prog = gl.createProgram();
-  gl.attachShader(prog,vs); gl.attachShader(prog,fs);
-  gl.linkProgram(prog);
-  if(!gl.getProgramParameter(prog,gl.LINK_STATUS))
-    throw new Error(gl.getProgramInfoLog(prog));
-  gl.useProgram(prog);
-
-  // locations
-  a_pos    = gl.getAttribLocation(prog,'a_pos');
-  u_tex    = gl.getUniformLocation(prog,'u_tex');
-  u_res    = gl.getUniformLocation(prog,'u_res');
-  u_time   = gl.getUniformLocation(prog,'u_time');
-  u_count  = gl.getUniformLocation(prog,'u_count');
-  u_centers= gl.getUniformLocation(prog,'u_centers');
-  u_str    = gl.getUniformLocation(prog,'u_str');
-  u_vel    = gl.getUniformLocation(prog,'u_vel');
-
-  // fullscreen quad
-  quadBuf = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
-  gl.bufferData(gl.ARRAY_BUFFER,
-    new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
-  gl.enableVertexAttribArray(a_pos);
-  gl.vertexAttribPointer(a_pos,2,gl.FLOAT,false,0,0);
-
-  // camera texture
-  camTex = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, camTex);
-  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
-  gl.uniform1i(u_tex,0);
-
-  resize();
-  window.addEventListener('resize', resize);
-  window.addEventListener('orientationchange', ()=>setTimeout(resize,200));
-}
-
-function resize(){
-  if(!gl) return;
-  const dpr = Math.min(window.devicePixelRatio||1, 2);
-  const w = cvs.clientWidth * dpr;
-  const h = cvs.clientHeight * dpr;
-  if(cvs.width!==w||cvs.height!==h){ cvs.width=w; cvs.height=h; }
-  gl.viewport(0,0,cvs.width,cvs.height);
-  gl.uniform2f(u_res, cvs.width, cvs.height);
-}
-
-// ── Camera ──────────────────────────────────────────────────
-async function startCamera(){
-  if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; }
-  streaming = false;
-
-  // iPad Safari needs exact:false for facingMode to work reliably
-  const constraints = {
-    audio: false,
-    video: {
-      facingMode: facingMode,        // NOT {exact:...}
-      width : {ideal:1280},
-      height: {ideal:720}
-    }
-  };
-
-  try{
-    stream = await navigator.mediaDevices.getUserMedia(constraints);
-    vid.srcObject = stream;
-
-    // iPad Safari: must call play() explicitly after srcObject
-    await vid.play().catch(()=>{});
-
-    streaming = true;
-    applyVideoCSS();
-    if(!mpHands) initMediaPipe();
-
-  }catch(e){
-    console.error('Camera error:',e);
-    alert('Camera failed: '+e.message+
-          '\nMake sure you are on HTTPS and granted camera permission.');
-  }
-}
-
-function applyVideoCSS(){
-  // iPad/iPhone: OS already rotates the frame correctly.
-  // Front camera: mirror with scaleX(-1).
-  // Rear camera: no transform.
-  // We NEVER rotate because the OS/browser handles orientation.
-  vid.style.transform = (facingMode==='user') ? 'scaleX(-1)' : 'none';
-}
-
-flipBtn.addEventListener('click', ()=>{
-  facingMode = (facingMode==='user') ? 'environment' : 'user';
-  startCamera();
+window.addEventListener('resize', () => {
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight;
+  gl.viewport(0, 0, canvas.width, canvas.height);
 });
 
-// ── MediaPipe Hands ─────────────────────────────────────────
-let mpHands = null, mpCam = null;
-
-function initMediaPipe(){
-  mpHands = new Hands({
-    locateFile: f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
-  });
-  mpHands.setOptions({
-    maxNumHands        : MAX_HANDS,
-    modelComplexity    : 1,
-    minDetectionConfidence: 0.6,
-    minTrackingConfidence : 0.6
-  });
-  mpHands.onResults(onResults);
-
-  mpCam = new Camera(vid,{
-    onFrame: async()=>{ if(streaming) await mpHands.send({image:vid}); },
-    width:640, height:480
-  });
-  mpCam.start();
-}
-
-let firstHand = false;
-
-function onResults(res){
-  const now = performance.now();
-  const list = res.multiHandLandmarks || [];
-
-  for(let h=0;h<MAX_HANDS;h++){
-    const lm = list[h];
-    const st = hands_state[h];
-
-    if(lm){
-      const prev = st.centers[9]||[0.5,0.5]; // palm prev
-
-      const cs = LENS_IDX.map(idx=>{
-        let x=lm[idx].x, y=lm[idx].y;
-        // if front camera, we CSS-mirrored the video, so mirror the coords too
-        if(facingMode==='user') x=1-x;
-        return [x,y];
-      });
-      st.centers = cs;
-      st.alive   = true;
-      st.lastSeen= now;
-
-      // palm velocity
-      const palm = cs[8]; // index 8 → landmark 0 (wrist)
-      velFlat[0] = palm[0] - prev[0];
-      velFlat[1] = palm[1] - prev[1];
-      st.palmPrev= palm;
-
-      if(!firstHand){
-        firstHand=true;
-        hint.classList.add('gone');
-      }
-    } else {
-      if(now - st.lastSeen > 300) st.alive=false;
-    }
+// ─── SHADERS ─────────────────────────────────────────────────────────────────
+const vsSource = `
+  attribute vec2 a_position;
+  varying   vec2 v_uv;
+  void main() {
+    v_uv        = a_position * 0.5 + 0.5;
+    v_uv.y      = 1.0 - v_uv.y; // flip Y for camera
+    gl_Position = vec4(a_position, 0.0, 1.0);
   }
-}
+`;
 
-// ── Lerp strength ───────────────────────────────────────────
-function updateStrengths(dt){
-  const inS=7, outS=3;
-  hands_state.forEach(st=>{
-    const target = st.alive ? 1 : 0;
-    const spd    = st.alive ? inS : outS;
-    st.strength += (target - st.strength) * Math.min(1, dt*spd);
-    st.strength  = Math.max(0, Math.min(1, st.strength));
-  });
-}
+// The core distortion fragment shader
+const fsSource = `
+  precision highp float;
+  varying   vec2      v_uv;
+  uniform   sampler2D u_camera;   // live camera feed
+  uniform   vec2      u_joints[21]; // hand landmark positions (0..1)
+  uniform   float     u_depth;    // simulated hand depth
+  uniform   float     u_time;
 
-// ── Pack uniforms ────────────────────────────────────────────
-function packUniforms(){
-  let count=0;
-  for(let h=0;h<MAX_HANDS;h++){
-    const st=hands_state[h];
-    for(let j=0;j<LENS_PER;j++){
-      const gi=h*LENS_PER+j;
-      const s=st.strength;
-      if(s>0.001){
-        const c=st.centers[j]||[0.5,0.5];
-        centersFlat[gi*2+0]=c[0];
-        centersFlat[gi*2+1]=c[1];
-        strengthsFlat[gi]=s;
-        count=gi+1;
-      } else {
-        centersFlat[gi*2+0]=0;
-        centersFlat[gi*2+1]=0;
-        strengthsFlat[gi]=0;
-      }
-    }
+  // Chromatic-aberration-style displacement
+  vec2 distort(vec2 uv, vec2 center, float radius, float strength) {
+    vec2  delta = uv - center;
+    float dist  = length(delta);
+    float falloff = exp(-dist * dist / (2.0 * radius * radius));
+    // Swirling displacement: rotate delta by angle based on dist
+    float angle   = falloff * strength * 6.2831;
+    float cosA    = cos(angle);
+    float sinA    = sin(angle);
+    vec2  rotated = vec2(
+      cosA * delta.x - sinA * delta.y,
+      sinA * delta.x + cosA * delta.y
+    );
+    return center + rotated - delta; // displacement vector
   }
-  gl.uniform1i(u_count, count);
-  gl.uniform2fv(u_centers, centersFlat);
-  gl.uniform1fv(u_str,     strengthsFlat);
-  gl.uniform2fv(u_vel,     velFlat);
+
+  void main() {
+    vec2 uv = v_uv;
+    vec2 totalDisp = vec2(0.0);
+
+    // Apply distortion from each finger tip + key joints
+    // Tips: 4(thumb), 8(index), 12(middle), 16(ring), 20(pinky)
+    // MCPs: 5, 9, 13, 17
+    int tips[9];
+    // Manually unroll — GLSL ES 1.0 doesn't allow dynamic indexing
+    float radius   = 0.08 + u_depth * 0.04; // bigger when hand is closer
+    float strength = 0.35 * u_depth;
+
+    totalDisp += distort(uv, u_joints[4],  radius, strength);
+    totalDisp += distort(uv, u_joints[8],  radius * 1.1, strength * 1.2);
+    totalDisp += distort(uv, u_joints[12], radius * 1.1, strength * 1.1);
+    totalDisp += distort(uv, u_joints[16], radius, strength);
+    totalDisp += distort(uv, u_joints[20], radius * 0.9, strength * 0.9);
+    totalDisp += distort(uv, u_joints[0],  radius * 1.3, strength * 0.6); // wrist
+    totalDisp += distort(uv, u_joints[9],  radius * 1.2, strength * 0.8); // palm
+
+    // Clamp displacement to avoid extreme warping
+    totalDisp = clamp(totalDisp, -0.15, 0.15);
+
+    vec2 uvR = uv + totalDisp * 1.0;
+    vec2 uvG = uv + totalDisp * 0.85; // chromatic aberration
+    vec2 uvB = uv + totalDisp * 0.70;
+
+    float r = texture2D(u_camera, uvR).r;
+    float g = texture2D(u_camera, uvG).g;
+    float b = texture2D(u_camera, uvB).b;
+
+    // Iridescent overlay near distortion center
+    float distortMag = length(totalDisp) * 8.0;
+    vec3  iridescence = vec3(
+      sin(distortMag * 3.0 + u_time * 2.0) * 0.5 + 0.5,
+      sin(distortMag * 4.5 + u_time * 2.5 + 2.094) * 0.5 + 0.5,
+      sin(distortMag * 6.0 + u_time * 3.0 + 4.188) * 0.5 + 0.5
+    );
+
+    vec3 base    = vec3(r, g, b);
+    vec3 final   = mix(base, iridescence, distortMag * 0.4);
+
+    gl_FragColor = vec4(final, 1.0);
+  }
+`;
+
+// ─── COMPILE SHADERS ─────────────────────────────────────────────────────────
+function compileShader(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+    console.error(gl.getShaderInfoLog(s));
+  return s;
 }
 
-// ── Render loop ──────────────────────────────────────────────
-let t0=null, tLast=null;
-function render(now){
+const program = gl.createProgram();
+gl.attachShader(program, compileShader(gl.VERTEX_SHADER,   vsSource));
+gl.attachShader(program, compileShader(gl.FRAGMENT_SHADER, fsSource));
+gl.linkProgram(program);
+gl.useProgram(program);
+
+// ─── FULLSCREEN QUAD ─────────────────────────────────────────────────────────
+const quad = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+gl.bufferData(gl.ARRAY_BUFFER,
+  new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+const aPos = gl.getAttribLocation(program, 'a_position');
+gl.enableVertexAttribArray(aPos);
+gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+// ─── CAMERA TEXTURE ──────────────────────────────────────────────────────────
+const camTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, camTex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+// ─── UNIFORM LOCATIONS ───────────────────────────────────────────────────────
+const uCamera = gl.getUniformLocation(program, 'u_camera');
+const uJoints = gl.getUniformLocation(program, 'u_joints');
+const uDepth  = gl.getUniformLocation(program, 'u_depth');
+const uTime   = gl.getUniformLocation(program, 'u_time');
+
+// ─── HAND LANDMARKS STATE ────────────────────────────────────────────────────
+let handLandmarks = new Array(21).fill(null).map(() => ({ x: -1, y: -1 }));
+let handDepth = 0.5;
+
+// ─── MEDIAPIPE HANDS SETUP ───────────────────────────────────────────────────
+const hands = new Hands({
+  locateFile: (file) =>
+    `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+});
+
+hands.setOptions({
+  maxNumHands: 1,
+  modelComplexity: 1,
+  minDetectionConfidence: 0.7,
+  minTrackingConfidence: 0.6
+});
+
+hands.onResults((results) => {
+  if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+    const lm = results.multiHandLandmarks[0];
+    handLandmarks = lm;
+
+    // Simulate depth: distance between wrist(0) and middle MCP(9)
+    // Larger distance = hand closer to camera [web:43]
+    const wrist = lm[0], midMCP = lm[9];
+    const d = Math.hypot(wrist.x - midMCP.x, wrist.y - midMCP.y);
+    handDepth = THREE_MathUtils_mapLinear(d, 0.05, 0.3, 0.2, 1.5);
+  } else {
+    // No hand → fade depth to zero smoothly
+    handDepth *= 0.9;
+  }
+});
+
+function THREE_MathUtils_mapLinear(x, a1, a2, b1, b2) {
+  return b1 + (x - a1) * (b2 - b1) / (a2 - a1);
+}
+
+// ─── START CAMERA ────────────────────────────────────────────────────────────
+const camera = new Camera(video, {
+  onFrame: async () => { await hands.send({ image: video }); },
+  width: 1280,
+  height: 720,
+  facingMode: 'environment' // rear camera on mobile
+});
+camera.start();
+
+// ─── RENDER LOOP ─────────────────────────────────────────────────────────────
+function render(timestamp) {
   requestAnimationFrame(render);
-  if(!gl||!streaming||vid.readyState<2) return;
-  if(!t0){ t0=now; tLast=now; }
 
-  const elapsed = (now-t0)/1000;
-  const dt      = (now-tLast)/1000;
-  tLast=now;
-
-  updateStrengths(dt);
-
-  // Upload video frame
-  gl.activeTexture(gl.TEXTURE0);
+  // Upload camera frame to GPU
   gl.bindTexture(gl.TEXTURE_2D, camTex);
-  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,vid);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
 
-  gl.clearColor(0,0,0,1);
-  gl.clear(gl.COLOR_BUFFER_BIT);
-
-  gl.useProgram(prog);
-  gl.bindBuffer(gl.ARRAY_BUFFER,quadBuf);
-  gl.enableVertexAttribArray(a_pos);
-  gl.vertexAttribPointer(a_pos,2,gl.FLOAT,false,0,0);
-
-  gl.uniform1f(u_time, elapsed);
-  packUniforms();
-  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
-
-  updateAudio();
-}
-
-// ── Audio ────────────────────────────────────────────────────
-let audioCtx=null, masterGain=null, voices=[];
-
-function initAudio(){
-  if(audioCtx) return;
-  audioCtx = new(window.AudioContext||window.webkitAudioContext)();
-  masterGain = audioCtx.createGain();
-  masterGain.gain.value = 0;
-  masterGain.connect(audioCtx.destination);
-
-  for(let i=0;i<MAX_HANDS;i++){
-    const o1=audioCtx.createOscillator();
-    const o2=audioCtx.createOscillator();
-    const g =audioCtx.createGain();
-    const f =audioCtx.createBiquadFilter();
-    o1.type='sine'; o2.type='triangle';
-    o1.frequency.value=220; o2.frequency.value=330;
-    f.type='bandpass'; f.frequency.value=600; f.Q.value=4;
-    o1.connect(g); o2.connect(g); g.connect(f); f.connect(masterGain);
-    g.gain.value=0; o1.start(); o2.start();
-    voices.push({o1,o2,g,f});
+  // Build flat [x0,y0, x1,y1 ... x20,y20] array for shader
+  const joints = new Float32Array(42);
+  for (let i = 0; i < 21; i++) {
+    const lm = handLandmarks[i] || { x: -1, y: -1 };
+    joints[i * 2]     = lm.x;        // MediaPipe: 0=left, 1=right
+    joints[i * 2 + 1] = 1.0 - lm.y; // flip Y to match UV space
   }
+
+  gl.uniform1i(uCamera, 0);
+  gl.uniform2fv(uJoints, joints);
+  gl.uniform1f(uDepth, Math.max(0, handDepth));
+  gl.uniform1f(uTime, timestamp * 0.001);
+
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 }
 
-function updateAudio(){
-  if(!audioCtx||!masterGain) return;
-  let any=false;
-  const t=audioCtx.currentTime;
-  hands_state.forEach((st,i)=>{
-    const v=voices[i];
-    const palm=st.centers[8]||[0.5,0.5];
-    const y=1-palm[1];
-    const freq=200+900*y;
-    v.o1.frequency.setTargetAtTime(freq*.5,t,.06);
-    v.o2.frequency.setTargetAtTime(freq,t,.06);
-    v.f.frequency.setTargetAtTime(300+3000*st.strength,t,.09);
-    v.g.gain.setTargetAtTime(.55*st.strength,t,.07);
-    if(st.strength>.02) any=true;
-  });
-  masterGain.gain.setTargetAtTime(any?.85:0,t,.12);
-}
-
-// ── Gate / start ─────────────────────────────────────────────
-function boot(){
-  if(gate.style.display==='none') return;
-  gate.style.display='none';
-  initAudio();
-  initGL();
-  startCamera();
-  requestAnimationFrame(render);
-}
-startB.addEventListener('click', boot);
-gate.addEventListener('click',   boot);
-
-})();
+requestAnimationFrame(render);
 </script>
 </body>
 </html>
