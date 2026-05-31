@@ -59,7 +59,7 @@ precision highp float;
 varying vec2 v_uv;
 uniform sampler2D u_camera;
 uniform vec2      u_joints[21];
-uniform float     u_depth;
+uniform float     u_depth;   // now = motion amount
 
 float smoothCircle(vec2 p, vec2 center, float radius) {
   float d = length(p - center);
@@ -69,13 +69,13 @@ float smoothCircle(vec2 p, vec2 center, float radius) {
 void main() {
   vec2 uv = v_uv;
 
-  // If no hand, just show camera
-  if (u_depth <= 0.001) {
+  // If motion is tiny, just show camera (no distortion)
+  if (u_depth <= 0.02) {
     gl_FragColor = texture2D(u_camera, uv);
     return;
   }
 
-  // Wrist (0) and palm (9)
+  // Wrist (0) and palm center (9)
   vec2 c0 = u_joints[0];
   vec2 c1 = u_joints[9];
   vec2 center = mix(c0, c1, 0.6);
@@ -85,21 +85,20 @@ void main() {
   float mask  = smoothCircle(uv, center, radius);
 
   vec2 dir   = normalize(uv - center + 1e-6);
-  float amt  = (1.0 - mask) * 0.04;
+  float amt  = (1.0 - mask) * (0.03 + u_depth * 0.04);
   vec2 offset = dir * amt;
 
-  // Slight RGB split for glassy look
+  // Mild RGB split
   vec3 col;
   col.r = texture2D(u_camera, uv + offset * 1.02).r;
   col.g = texture2D(u_camera, uv + offset * 0.99).g;
   col.b = texture2D(u_camera, uv + offset * 0.96).b;
 
-  // Brighten inside the portal
-  col *= 1.0 + (1.0 - mask) * 0.35;
+  // Brighten inside the portal based on motion
+  col *= 1.0 + (1.0 - mask) * (0.2 + u_depth * 0.4);
 
-  // Soft rim highlight
   float edge = smoothstep(radius * 0.9, radius, length(uv - center));
-  col += vec3(edge * 0.2);
+  col += vec3(edge * 0.2 * u_depth);
 
   gl_FragColor = vec4(col, 1.0);
 }
@@ -148,7 +147,7 @@ const uDepth  = gl.getUniformLocation(program, 'u_depth');
 // ── HAND TRACKING ──
 let handLandmarks = new Array(21).fill(null).map(() => ({x:-1,y:-1}));
 let prevLandmarks = null;
-let depthValue    = 0.0;
+let depthValue    = 0.0;   // here = motion
 
 const hands = new Hands({
   locateFile: (file) =>
@@ -178,20 +177,29 @@ hands.onResults((results) => {
         y: p.y + (c.y - p.y) * alpha
       });
     }
+
+    // motion (average per-joint delta)
+    let motion = 0.0;
+    for (let i = 0; i < smooth.length; i++) {
+      const p = prevLandmarks[i];
+      const c = smooth[i];
+      const dx = c.x - p.x;
+      const dy = c.y - p.y;
+      motion += Math.sqrt(dx*dx + dy*dy);
+    }
+    motion = motion / smooth.length;
+    motion = Math.min(1.5, motion * 25.0); // gain
+
+    depthValue = motion;        // drive shader with motion
     prevLandmarks = smooth;
     handLandmarks = smooth;
-
-    const wrist = smooth[0];
-    const mid   = smooth[9];
-    const d = Math.hypot(wrist.x - mid.x, wrist.y - mid.y);
-    // map distance to 0..1-ish range
-    depthValue = Math.min(1.2, Math.max(0.0, (d - 0.05) / (0.25 - 0.05)));
   } else {
-    depthValue *= 0.9; // fade out when hand lost
+    // When no hand, let motion quickly decay to zero
+    depthValue *= 0.8;
   }
 });
 
-// Start camera via MediaPipe helper
+// Start camera
 const camera = new Camera(video, {
   onFrame: async () => { await hands.send({ image: video }); },
   width: 1280,
