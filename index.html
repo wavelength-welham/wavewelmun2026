@@ -17,9 +17,7 @@
       height: 100%;
       display: block;
     }
-    video {
-      display: none;
-    }
+    video { display: none; }
   </style>
 </head>
 <body>
@@ -59,46 +57,98 @@ precision highp float;
 varying vec2 v_uv;
 uniform sampler2D u_camera;
 uniform vec2      u_joints[21];
-uniform float     u_depth;   // now = motion amount
+uniform float     u_depth;   // motion
 
-float smoothCircle(vec2 p, vec2 center, float radius) {
-  float d = length(p - center);
-  return smoothstep(radius, radius * 0.6, d);
+// distance to segment a-b
+float segDist(vec2 p, vec2 a, vec2 b) {
+  vec2 pa = p - a;
+  vec2 ba = b - a;
+  float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+  return length(pa - ba * h);
+}
+
+// build a soft "hand outline" by connecting key joints
+float handBorderMask(vec2 p) {
+  // approximate contour: thumb, index, middle, ring, pinky, edge of palm
+  int idx[10];
+  // thumb: 1-2-3-4
+  // index: 5-6-7-8
+  // middle: 9-10-11-12
+  // ring: 13-14-15-16
+  // pinky: 17-18-19-20
+  // plus side of palm: 0-17 and 0-5
+  float minD = 1.0;
+  vec2 a; vec2 b;
+
+  // thumb
+  a = u_joints[1]; b = u_joints[2]; minD = min(minD, segDist(p,a,b));
+  a = u_joints[2]; b = u_joints[3]; minD = min(minD, segDist(p,a,b));
+  a = u_joints[3]; b = u_joints[4]; minD = min(minD, segDist(p,a,b));
+  // index
+  a = u_joints[5]; b = u_joints[6]; minD = min(minD, segDist(p,a,b));
+  a = u_joints[6]; b = u_joints[7]; minD = min(minD, segDist(p,a,b));
+  a = u_joints[7]; b = u_joints[8]; minD = min(minD, segDist(p,a,b));
+  // middle
+  a = u_joints[9];  b = u_joints[10]; minD = min(minD, segDist(p,a,b));
+  a = u_joints[10]; b = u_joints[11]; minD = min(minD, segDist(p,a,b));
+  a = u_joints[11]; b = u_joints[12]; minD = min(minD, segDist(p,a,b));
+  // ring
+  a = u_joints[13]; b = u_joints[14]; minD = min(minD, segDist(p,a,b));
+  a = u_joints[14]; b = u_joints[15]; minD = min(minD, segDist(p,a,b));
+  a = u_joints[15]; b = u_joints[16]; minD = min(minD, segDist(p,a,b));
+  // pinky
+  a = u_joints[17]; b = u_joints[18]; minD = min(minD, segDist(p,a,b));
+  a = u_joints[18]; b = u_joints[19]; minD = min(minD, segDist(p,a,b));
+  a = u_joints[19]; b = u_joints[20]; minD = min(minD, segDist(p,a,b));
+  // palm edges
+  a = u_joints[0]; b = u_joints[5];  minD = min(minD, segDist(p,a,b));
+  a = u_joints[0]; b = u_joints[17]; minD = min(minD, segDist(p,a,b));
+
+  float borderWidth = 0.03;         // thickness of outline
+  float inner = smoothstep(borderWidth * 0.4, 0.0, minD);
+  float outer = smoothstep(borderWidth, borderWidth * 0.4, minD);
+  return inner * outer;             // band around the outline
 }
 
 void main() {
   vec2 uv = v_uv;
 
-  // If motion is tiny, just show camera (no distortion)
-  if (u_depth <= 0.02) {
-    gl_FragColor = texture2D(u_camera, uv);
+  vec3 base = texture2D(u_camera, uv).rgb;
+
+  // no motion => no effect
+  if (u_depth <= 0.015) {
+    gl_FragColor = vec4(base, 1.0);
     return;
   }
 
-  // Wrist (0) and palm center (9)
-  vec2 c0 = u_joints[0];
-  vec2 c1 = u_joints[9];
-  vec2 center = mix(c0, c1, 0.6);
+  float mask = handBorderMask(uv);
 
-  float baseRadius = 0.18;
-  float radius = baseRadius * (0.7 + u_depth * 0.5);
-  float mask  = smoothCircle(uv, center, radius);
+  if (mask <= 0.001) {
+    gl_FragColor = vec4(base, 1.0);
+    return;
+  }
 
-  vec2 dir   = normalize(uv - center + 1e-6);
-  float amt  = (1.0 - mask) * (0.03 + u_depth * 0.04);
-  vec2 offset = dir * amt;
+  // direction roughly perpendicular to palm (wrist->middle knuckle)
+  vec2 wrist = u_joints[0];
+  vec2 mid   = u_joints[9];
+  vec2 normal = normalize(mid - wrist);
+  normal = vec2(-normal.y, normal.x); // rotate 90deg
 
-  // Mild RGB split
+  float strength = mask * (0.02 + u_depth * 0.03);
+  vec2 offset = normal * strength;
+
+  // clamp offset
+  offset = clamp(offset, vec2(-0.04), vec2(0.04));
+
+  // subtle glass refraction
   vec3 col;
-  col.r = texture2D(u_camera, uv + offset * 1.02).r;
+  col.r = texture2D(u_camera, uv + offset * 1.01).r;
   col.g = texture2D(u_camera, uv + offset * 0.99).g;
-  col.b = texture2D(u_camera, uv + offset * 0.96).b;
+  col.b = texture2D(u_camera, uv + offset * 0.97).b;
 
-  // Brighten inside the portal based on motion
-  col *= 1.0 + (1.0 - mask) * (0.2 + u_depth * 0.4);
-
-  float edge = smoothstep(radius * 0.9, radius, length(uv - center));
-  col += vec3(edge * 0.2 * u_depth);
+  // slightly brighten inside border, like light catching glass edge
+  col = mix(base, col, mask * (0.6 + u_depth * 0.4));
+  col += vec3(mask * 0.15 * u_depth);
 
   gl_FragColor = vec4(col, 1.0);
 }
@@ -147,7 +197,7 @@ const uDepth  = gl.getUniformLocation(program, 'u_depth');
 // ── HAND TRACKING ──
 let handLandmarks = new Array(21).fill(null).map(() => ({x:-1,y:-1}));
 let prevLandmarks = null;
-let depthValue    = 0.0;   // here = motion
+let depthValue    = 0.0;   // motion
 
 const hands = new Hands({
   locateFile: (file) =>
@@ -165,7 +215,6 @@ hands.onResults((results) => {
   if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
     const lm = results.multiHandLandmarks[0];
 
-    // smoothing
     if (!prevLandmarks) prevLandmarks = lm;
     const alpha = 0.3;
     const smooth = [];
@@ -178,7 +227,7 @@ hands.onResults((results) => {
       });
     }
 
-    // motion (average per-joint delta)
+    // motion = average per-joint delta
     let motion = 0.0;
     for (let i = 0; i < smooth.length; i++) {
       const p = prevLandmarks[i];
@@ -187,15 +236,14 @@ hands.onResults((results) => {
       const dy = c.y - p.y;
       motion += Math.sqrt(dx*dx + dy*dy);
     }
-    motion = motion / smooth.length;
-    motion = Math.min(1.5, motion * 25.0); // gain
+    motion /= smooth.length;
+    motion = Math.min(1.5, motion * 25.0);
 
-    depthValue = motion;        // drive shader with motion
+    depthValue = motion;
     prevLandmarks = smooth;
     handLandmarks = smooth;
   } else {
-    // When no hand, let motion quickly decay to zero
-    depthValue *= 0.8;
+    depthValue *= 0.8; // decay motion when no hand
   }
 });
 
