@@ -1,490 +1,572 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <title>WebAR Liquid Tear Distortion</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
-  <style>
-    html,body{
-      margin:0;padding:0;width:100%;height:100%;
-      overflow:hidden;background:#000;
-      font-family:system-ui,-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;
-      touch-action:none;-webkit-user-select:none;user-select:none;
-    }
-    #app{position:fixed;inset:0;overflow:hidden;background:#000;}
+<meta charset="UTF-8"/>
+<title>Liquid Glass AR</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+html,body{
+  width:100%;height:100%;overflow:hidden;
+  background:#000;
+  font-family:system-ui,-apple-system,sans-serif;
+  touch-action:none;-webkit-user-select:none;user-select:none;
+}
+#wrap{position:fixed;inset:0;background:#000;}
 
-    video#camera{
-      position:absolute;inset:0;width:100%;height:100%;
-      object-fit:cover;
-      transform-origin:center center;
-      background:#000;
-    }
-    canvas#glcanvas{
-      position:absolute;inset:0;width:100%;height:100%;
-      pointer-events:none;
-    }
-    #ui{position:absolute;inset:0;pointer-events:none;}
-    #controls{
-      position:absolute;right:12px;bottom:12px;
-      display:flex;flex-direction:column;gap:8px;
-      pointer-events:auto;
-    }
-    button{
-      border:none;border-radius:999px;
-      padding:10px 16px;
-      background:rgba(0,0,0,0.55);color:#fff;
-      font-size:14px;letter-spacing:0.03em;text-transform:uppercase;
-      backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
-    }
-    button:active{background:rgba(255,255,255,0.18);}
-
-    #hint{
-      position:absolute;left:50%;bottom:18%;
-      transform:translateX(-50%);
-      color:#fff;font-size:15px;
-      padding:10px 16px;border-radius:999px;
-      background:rgba(0,0,0,0.55);
-      backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
-      opacity:1;transition:opacity .6s ease;
-      pointer-events:none;white-space:nowrap;
-    }
-    #hint.hidden{opacity:0;}
-
-    #tapStart{
-      position:absolute;inset:0;
-      background:rgba(0,0,0,0.75);color:#fff;
-      display:flex;align-items:center;justify-content:center;
-      flex-direction:column;text-align:center;
-      z-index:10;pointer-events:auto;
-    }
-    #tapStart button{margin-top:16px;background:#fff;color:#000;}
-  </style>
+/* VIDEO: NO css transform at all — we handle orientation purely in JS/shader */
+video#cam{
+  position:absolute;inset:0;
+  width:100%;height:100%;
+  object-fit:cover;
+  background:#000;
+}
+canvas#gl{
+  position:absolute;inset:0;
+  width:100%;height:100%;
+  pointer-events:none;
+}
+#ui{position:absolute;inset:0;pointer-events:none;}
+#hint{
+  position:absolute;bottom:18%;left:50%;transform:translateX(-50%);
+  color:#fff;font-size:15px;padding:10px 18px;border-radius:999px;
+  background:rgba(0,0,0,0.55);backdrop-filter:blur(10px);
+  -webkit-backdrop-filter:blur(10px);
+  opacity:1;transition:opacity .7s;white-space:nowrap;pointer-events:none;
+}
+#hint.gone{opacity:0;}
+#btns{
+  position:absolute;right:14px;bottom:14px;
+  display:flex;flex-direction:column;gap:8px;pointer-events:auto;
+}
+button{
+  border:none;border-radius:999px;padding:10px 18px;
+  background:rgba(0,0,0,0.55);color:#fff;font-size:13px;
+  letter-spacing:.04em;text-transform:uppercase;
+  backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+}
+button:active{background:rgba(255,255,255,.2);}
+#gate{
+  position:absolute;inset:0;z-index:20;
+  background:rgba(0,0,0,.8);color:#fff;
+  display:flex;align-items:center;justify-content:center;
+  flex-direction:column;gap:14px;text-align:center;
+  pointer-events:auto;
+}
+#gate p{font-size:16px;opacity:.8;max-width:280px;line-height:1.5;}
+#gate button{background:#fff;color:#000;font-size:15px;padding:12px 28px;}
+</style>
 </head>
 <body>
-  <div id="app">
-    <video id="camera" playsinline autoplay muted></video>
-    <canvas id="glcanvas"></canvas>
-
-    <div id="ui">
-      <div id="hint">Reach out with your hand</div>
-      <div id="controls">
-        <button id="flipBtn">Flip Camera</button>
-      </div>
-      <div id="tapStart">
-        <div>Tap to enable camera &amp; audio</div>
-        <button id="startBtn">Start</button>
-      </div>
+<div id="wrap">
+  <video id="cam" playsinline autoplay muted></video>
+  <canvas id="gl"></canvas>
+  <div id="ui">
+    <div id="hint">Show your hand to the camera</div>
+    <div id="btns">
+      <button id="flipBtn">Flip Camera</button>
     </div>
   </div>
+  <div id="gate">
+    <p>Tap to start — camera &amp; audio needed</p>
+    <button id="startBtn">Start</button>
+  </div>
+</div>
 
-  <!-- Vertex shader -->
-  <script id="vs" type="x-shader/x-vertex">
-    attribute vec2 a_position;
-    varying vec2 v_uv;
-    void main(){
-      v_uv = a_position*0.5+0.5;
-      gl_Position = vec4(a_position,0.0,1.0);
+<!-- ── VERTEX SHADER ───────────────────────────────────────────── -->
+<script id="vs" type="x-shader/x-vertex">
+attribute vec2 a_pos;
+varying vec2 v_uv;
+void main(){
+  // v_uv in [0,1]; bottom-left origin in WebGL
+  v_uv = a_pos * 0.5 + 0.5;
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+}
+</script>
+
+<!-- ── FRAGMENT SHADER ────────────────────────────────────────── -->
+<script id="fs" type="x-shader/x-fragment">
+precision highp float;
+varying vec2 v_uv;
+
+uniform sampler2D u_tex;
+uniform vec2      u_res;       // canvas resolution
+uniform float     u_time;
+uniform int       u_count;     // total active centres
+
+// up to 20 lens centres (10 per hand × 2 hands)
+uniform vec2  u_centers[20];
+uniform float u_str[20];      // per-centre strength 0..1
+uniform vec2  u_vel;          // palm velocity (normalised, for stretch)
+
+// ── Metaball field ────────────────────────────────────────────
+// Returns a field value 0..n that represents "how close am I to
+// the hand shape". Uses smooth-minimum for organic blending.
+float smin(float a,float b,float k){
+  float h=max(k-abs(a-b),0.0)/k;
+  return min(a,b)-h*h*k*0.25;
+}
+
+float handField(vec2 uv){
+  float f=1000.0;
+  for(int i=0;i<20;i++){
+    if(i>=u_count)break;
+    float s=u_str[i];
+    if(s<0.001)continue;
+    float r=mix(0.0,0.18,s);           // radius scales with strength
+    float d=length(uv-u_centers[i])-r;
+    f=smin(f,d,0.04);                  // smooth-blend into one shape
+  }
+  return f; // negative = inside the blob
+}
+
+// ── Noise for ripple ─────────────────────────────────────────
+float hash(vec2 p){
+  p=fract(p*vec2(127.1,311.7));
+  p+=dot(p,p+19.19);
+  return fract(p.x*p.y);
+}
+float noise(vec2 p){
+  vec2 i=floor(p),f=fract(p);
+  f=f*f*(3.0-2.0*f);
+  float a=hash(i),b=hash(i+vec2(1,0)),
+        c=hash(i+vec2(0,1)),d=hash(i+vec2(1,1));
+  return mix(mix(a,b,f.x),mix(c,d,f.x),f.y);
+}
+
+// ── Main ─────────────────────────────────────────────────────
+void main(){
+  vec2 uv = v_uv;
+
+  // correct aspect for distance math
+  vec2 aspect = vec2(u_res.x/u_res.y, 1.0);
+  vec2 uvA = uv * aspect;
+
+  float field = handField(uvA / aspect); // field in texel space
+
+  // Signed distance: negative = inside, 0 = edge, positive = outside
+  // threshold for "inside membrane"
+  float threshold = 0.0;
+  float edgeWidth = 0.025;              // width of the shimmer band
+
+  // inside: strong refraction; outside: nothing
+  float inside  = smoothstep( edgeWidth, -0.04, field); // 1 inside
+  float edgeBand= smoothstep( edgeWidth,  0.0,  field) *
+                  smoothstep(-0.04,        0.0,  field); // 1 on edge only
+
+  if(inside < 0.001 && edgeBand < 0.001){
+    // completely outside — show raw camera
+    gl_FragColor = vec4(texture2D(u_tex, uv).rgb, 1.0);
+    return;
+  }
+
+  // ── Gradient of the field (for refraction direction) ─────
+  float eps = 0.003;
+  vec2 uvAe = uvA;
+  float gx = handField((uvAe+vec2(eps,0.0))/aspect) -
+              handField((uvAe-vec2(eps,0.0))/aspect);
+  float gy = handField((uvAe+vec2(0.0,eps))/aspect) -
+              handField((uvAe-vec2(0.0,eps))/aspect);
+  vec2 grad = vec2(gx, gy); // points outward from field
+
+  // pull INWARD = opposite of grad
+  vec2 pullDir = -normalize(grad + vec2(1e-6));
+
+  // magnitude: strongest deep inside the field
+  float pullMag = 0.12 * inside;
+
+  // add ripple near edge to simulate "trembling glass"
+  float rippleFreq = 40.0;
+  float rippleAmp  = 0.008 * edgeBand;
+  float ripple = sin(uv.y * rippleFreq + u_time * 6.0) *
+                 sin(uv.x * rippleFreq * 0.7 + u_time * 4.5);
+  vec2 rippleOff = vec2(ripple, ripple * 0.7) * rippleAmp;
+
+  // velocity stretch: smear offset slightly in hand-motion direction
+  vec2 stretch = u_vel * 0.06 * inside;
+
+  vec2 offset = pullDir * pullMag + rippleOff + stretch;
+
+  // ── Chromatic aberration ─────────────────────────────────
+  float ab = 0.018;
+  vec2 uvR = clamp(uv + offset * (1.0 + ab), 0.001, 0.999);
+  vec2 uvG = clamp(uv + offset,              0.001, 0.999);
+  vec2 uvB = clamp(uv + offset * (1.0 - ab), 0.001, 0.999);
+
+  vec3 base     = texture2D(u_tex, uv).rgb;
+  vec3 refracted = vec3(
+    texture2D(u_tex, uvR).r,
+    texture2D(u_tex, uvG).g,
+    texture2D(u_tex, uvB).b
+  );
+
+  vec3 color = mix(base, refracted, inside);
+
+  // ── Iridescent shimmer on edge ───────────────────────────
+  float t = u_time * 0.8;
+  float phase = (uv.x + uv.y) * 3.0;
+  vec3 iri = vec3(
+    0.6 + 0.4*sin(phase + t*1.1),
+    0.6 + 0.4*sin(phase + t*0.9 + 2.09),
+    0.6 + 0.4*sin(phase + t*1.3 + 4.19)
+  );
+  color += iri * edgeBand * 0.65;
+
+  // thin bright outline at the very edge
+  float outline = smoothstep(0.01,0.0,abs(field)) * 0.5;
+  color += vec3(outline);
+
+  gl_FragColor = vec4(color, 1.0);
+}
+</script>
+
+<!-- MediaPipe -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+<script>
+(function(){
+'use strict';
+
+// ── DOM ─────────────────────────────────────────────────────
+const vid     = document.getElementById('cam');
+const cvs     = document.getElementById('gl');
+const flipBtn = document.getElementById('flipBtn');
+const hint    = document.getElementById('hint');
+const gate    = document.getElementById('gate');
+const startB  = document.getElementById('startBtn');
+
+// ── State ───────────────────────────────────────────────────
+const MAX_HANDS    = 2;
+const LENS_PER     = 10;
+const MAX_CENTERS  = MAX_HANDS * LENS_PER;
+
+// landmark indices → lens centres
+const LENS_IDX = [8,12,16,20,4,7,11,15,0,9];
+
+let facingMode = 'environment'; // start rear camera
+let stream     = null;
+let streaming  = false;
+
+// per-hand state
+const hands_state = Array.from({length:MAX_HANDS}, ()=>({
+  alive    : false,
+  strength : 0,
+  lastSeen : 0,
+  centers  : Array(LENS_PER).fill([0.5,0.5]),
+  palmPrev : [0.5,0.5]
+}));
+
+const centersFlat  = new Float32Array(MAX_CENTERS * 2);
+const strengthsFlat= new Float32Array(MAX_CENTERS);
+let   velFlat      = new Float32Array(2); // palm velocity
+
+// ── WebGL ────────────────────────────────────────────────────
+let gl, prog;
+let a_pos,u_tex,u_res,u_time,u_count,u_centers,u_str,u_vel;
+let quadBuf, camTex;
+
+function initGL(){
+  gl = cvs.getContext('webgl',{alpha:false,antialias:true,
+                                powerPreference:'high-performance'});
+  if(!gl){ alert('WebGL unavailable'); return; }
+
+  function compile(type, src){
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if(!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+      throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  }
+
+  const vs = compile(gl.VERTEX_SHADER,
+    document.getElementById('vs').textContent.trim());
+  const fs = compile(gl.FRAGMENT_SHADER,
+    document.getElementById('fs').textContent.trim());
+
+  prog = gl.createProgram();
+  gl.attachShader(prog,vs); gl.attachShader(prog,fs);
+  gl.linkProgram(prog);
+  if(!gl.getProgramParameter(prog,gl.LINK_STATUS))
+    throw new Error(gl.getProgramInfoLog(prog));
+  gl.useProgram(prog);
+
+  // locations
+  a_pos    = gl.getAttribLocation(prog,'a_pos');
+  u_tex    = gl.getUniformLocation(prog,'u_tex');
+  u_res    = gl.getUniformLocation(prog,'u_res');
+  u_time   = gl.getUniformLocation(prog,'u_time');
+  u_count  = gl.getUniformLocation(prog,'u_count');
+  u_centers= gl.getUniformLocation(prog,'u_centers');
+  u_str    = gl.getUniformLocation(prog,'u_str');
+  u_vel    = gl.getUniformLocation(prog,'u_vel');
+
+  // fullscreen quad
+  quadBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  gl.bufferData(gl.ARRAY_BUFFER,
+    new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(a_pos);
+  gl.vertexAttribPointer(a_pos,2,gl.FLOAT,false,0,0);
+
+  // camera texture
+  camTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, camTex);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.uniform1i(u_tex,0);
+
+  resize();
+  window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', ()=>setTimeout(resize,200));
+}
+
+function resize(){
+  if(!gl) return;
+  const dpr = Math.min(window.devicePixelRatio||1, 2);
+  const w = cvs.clientWidth * dpr;
+  const h = cvs.clientHeight * dpr;
+  if(cvs.width!==w||cvs.height!==h){ cvs.width=w; cvs.height=h; }
+  gl.viewport(0,0,cvs.width,cvs.height);
+  gl.uniform2f(u_res, cvs.width, cvs.height);
+}
+
+// ── Camera ──────────────────────────────────────────────────
+async function startCamera(){
+  if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; }
+  streaming = false;
+
+  // iPad Safari needs exact:false for facingMode to work reliably
+  const constraints = {
+    audio: false,
+    video: {
+      facingMode: facingMode,        // NOT {exact:...}
+      width : {ideal:1280},
+      height: {ideal:720}
     }
-  </script>
+  };
 
-  <!-- Fragment shader: inward-pull liquid tear -->
-  <script id="fs" type="x-shader/x-fragment">
-    precision highp float;
-    varying vec2 v_uv;
-    uniform sampler2D u_camera;
-    uniform vec2 u_resolution;
-    uniform float u_time;
+  try{
+    stream = await navigator.mediaDevices.getUserMedia(constraints);
+    vid.srcObject = stream;
 
-    const int MAX_CENTERS = 20;
-    uniform int u_centerCount;
-    uniform vec2 u_centers[MAX_CENTERS];
-    uniform float u_strengths[MAX_CENTERS];
+    // iPad Safari: must call play() explicitly after srcObject
+    await vid.play().catch(()=>{});
 
-    vec2 tearOffset(vec2 uv,out float influenceOut){
-      vec2 accum=vec2(0.0);
-      float totalInf=0.0;
-      for(int i=0;i<MAX_CENTERS;i++){
-        if(i>=u_centerCount)break;
-        float s=u_strengths[i];
-        if(s<=0.001)continue;
-        vec2 c=u_centers[i];
-        vec2 d=c-uv;                 // pull towards center
-        float dist=length(d);
-        float radius=mix(0.0,0.23,s);
-        if(dist>radius)continue;
-        float x=dist/radius;
-        float inner=pow(1.0-x,3.0);
-        float fall=smoothstep(1.0,0.0,x);
-        float influence=inner*fall*s;
-        vec2 dir=dist>1e-4?normalize(d):vec2(0.0);
-        float mag=0.16*influence;
-        accum+=dir*mag;
-        totalInf+=influence;
-      }
-      accum=clamp(accum,vec2(-0.35),vec2(0.35));
-      influenceOut=clamp(totalInf,0.0,1.5);
-      return accum;
-    }
+    streaming = true;
+    applyVideoCSS();
+    if(!mpHands) initMediaPipe();
 
-    vec3 shimmerColor(float edge,float t){
-      float phase=edge*2.3;
-      float r=0.65+0.35*sin(6.2831*(phase+0.03)+t*1.2);
-      float g=0.65+0.35*sin(6.2831*(phase+0.37)+t*0.96);
-      float b=0.65+0.35*sin(6.2831*(phase+0.71)+t*1.33);
-      return vec3(r,g,b);
-    }
+  }catch(e){
+    console.error('Camera error:',e);
+    alert('Camera failed: '+e.message+
+          '\nMake sure you are on HTTPS and granted camera permission.');
+  }
+}
 
-    void main(){
-      vec2 uv=v_uv;
-      float influence;
-      vec2 offset=tearOffset(uv,influence);
-      float pull=clamp(influence,0.0,1.0);
+function applyVideoCSS(){
+  // iPad/iPhone: OS already rotates the frame correctly.
+  // Front camera: mirror with scaleX(-1).
+  // Rear camera: no transform.
+  // We NEVER rotate because the OS/browser handles orientation.
+  vid.style.transform = (facingMode==='user') ? 'scaleX(-1)' : 'none';
+}
 
-      float ripple=sin((uv.y+uv.x)*60.0+u_time*5.0)*0.002;
-      float rippleMask=smoothstep(0.35,1.0,pull);
-      offset.y+=ripple*rippleMask;
+flipBtn.addEventListener('click', ()=>{
+  facingMode = (facingMode==='user') ? 'environment' : 'user';
+  startCamera();
+});
 
-      float ab=0.012;
-      vec2 uvR=clamp(uv+offset*(1.0+ab),0.001,0.999);
-      vec2 uvG=clamp(uv+offset,0.001,0.999);
-      vec2 uvB=clamp(uv+offset*(1.0-ab),0.001,0.999);
+// ── MediaPipe Hands ─────────────────────────────────────────
+let mpHands = null, mpCam = null;
 
-      vec3 base=texture2D(u_camera,uv).rgb;
-      vec3 colR=texture2D(u_camera,uvR).rgb;
-      vec3 colG=texture2D(u_camera,uvG).rgb;
-      vec3 colB=texture2D(u_camera,uvB).rgb;
-      vec3 refracted=vec3(colR.r,colG.g,colB.b);
+function initMediaPipe(){
+  mpHands = new Hands({
+    locateFile: f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
+  });
+  mpHands.setOptions({
+    maxNumHands        : MAX_HANDS,
+    modelComplexity    : 1,
+    minDetectionConfidence: 0.6,
+    minTrackingConfidence : 0.6
+  });
+  mpHands.onResults(onResults);
 
-      vec3 color=mix(base,refracted,pull);
+  mpCam = new Camera(vid,{
+    onFrame: async()=>{ if(streaming) await mpHands.send({image:vid}); },
+    width:640, height:480
+  });
+  mpCam.start();
+}
 
-      float edgeBand=smoothstep(0.3,0.95,pull)*(1.0-smoothstep(0.8,1.5,pull));
-      vec3 shimmer=shimmerColor(edgeBand,u_time)*edgeBand*0.7;
-      color+=shimmer;
-      gl_FragColor=vec4(color,1.0);
-    }
-  </script>
+let firstHand = false;
 
-  <!-- MediaPipe Hands -->
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+function onResults(res){
+  const now = performance.now();
+  const list = res.multiHandLandmarks || [];
 
-  <script>
-  (function(){
-    const video  = document.getElementById('camera');
-    const canvas = document.getElementById('glcanvas');
-    const flipBtn= document.getElementById('flipBtn');
-    const hint   = document.getElementById('hint');
-    const tapOverlay = document.getElementById('tapStart');
-    const startBtn   = document.getElementById('startBtn');
+  for(let h=0;h<MAX_HANDS;h++){
+    const lm = list[h];
+    const st = hands_state[h];
 
-    let gl, program;
-    let a_position,u_camera,u_resolution,u_time,u_centerCount,u_centers,u_strengths;
-    let quadBuffer,cameraTexture;
+    if(lm){
+      const prev = st.centers[9]||[0.5,0.5]; // palm prev
 
-    let facingMode = 'environment';       // start with rear cam (better for AR)
-    let mirrorVideo = false;              // we’ll set this per mode
-    let rotate180  = false;               // runtime fix for upside‑down video
-    let currentStream=null;
-    let streaming=false;
-
-    const MAX_HANDS=2,LENSES_PER_HAND=10,MAX_CENTERS=MAX_HANDS*LENSES_PER_HAND;
-    const handStates=[];
-    for(let i=0;i<MAX_HANDS;i++){
-      handStates.push({visible:false,strength:0,lastSeen:0,
-                       centers:new Array(LENSES_PER_HAND).fill([0.5,0.5])});
-    }
-    const centersFlat=new Float32Array(MAX_CENTERS*2);
-    const strengthsFlat=new Float32Array(MAX_CENTERS);
-
-    // Audio
-    let audioCtx=null,masterGain=null,handVoices=[];
-    function initAudio(){
-      if(audioCtx)return;
-      audioCtx=new (window.AudioContext||window.webkitAudioContext)();
-      masterGain=audioCtx.createGain();
-      masterGain.gain.setValueAtTime(0,audioCtx.currentTime);
-      masterGain.connect(audioCtx.destination);
-      for(let i=0;i<MAX_HANDS;i++){
-        const osc1=audioCtx.createOscillator();
-        const osc2=audioCtx.createOscillator();
-        const g=audioCtx.createGain();
-        const f=audioCtx.createBiquadFilter();
-        osc1.type='sine'; osc2.type='triangle';
-        osc1.frequency.value=220; osc2.frequency.value=440;
-        f.type='bandpass'; f.frequency.value=800; f.Q.value=3;
-        osc1.connect(g); osc2.connect(g); g.connect(f); f.connect(masterGain);
-        g.gain.value=0;
-        osc1.start(); osc2.start();
-        handVoices.push({osc1,osc2,gain:g,filter:f});
-      }
-    }
-    function updateAudio(){
-      if(!audioCtx||!masterGain)return;
-      let any=false,now=audioCtx.currentTime;
-      handStates.forEach((s,i)=>{
-        const v=handVoices[i];
-        const palm=s.centers[8]||[0.5,0.5];
-        const y=1-palm[1];
-        const freq=220+800*y;
-        v.osc1.frequency.setTargetAtTime(freq*0.5,now,0.07);
-        v.osc2.frequency.setTargetAtTime(freq,now,0.07);
-        v.filter.frequency.setTargetAtTime(400+2600*s.strength,now,0.09);
-        v.gain.gain.setTargetAtTime(0.6*s.strength,now,0.08);
-        if(s.strength>0.02)any=true;
+      const cs = LENS_IDX.map(idx=>{
+        let x=lm[idx].x, y=lm[idx].y;
+        // if front camera, we CSS-mirrored the video, so mirror the coords too
+        if(facingMode==='user') x=1-x;
+        return [x,y];
       });
-      masterGain.gain.setTargetAtTime(any?0.9:0,now,0.15);
-    }
+      st.centers = cs;
+      st.alive   = true;
+      st.lastSeen= now;
 
-    // GL
-    function initGL(){
-      gl=canvas.getContext('webgl',{alpha:true,antialias:true});
-      if(!gl){alert('WebGL not supported');return;}
-      const vsSrc=document.getElementById('vs').textContent.trim();
-      const fsSrc=document.getElementById('fs').textContent.trim();
-      function compile(t,s){
-        const sh=gl.createShader(t);
-        gl.shaderSource(sh,s);gl.compileShader(sh);
-        if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS)){
-          console.error(gl.getShaderInfoLog(sh));
-          throw new Error('shader error');
-        }
-        return sh;
+      // palm velocity
+      const palm = cs[8]; // index 8 → landmark 0 (wrist)
+      velFlat[0] = palm[0] - prev[0];
+      velFlat[1] = palm[1] - prev[1];
+      st.palmPrev= palm;
+
+      if(!firstHand){
+        firstHand=true;
+        hint.classList.add('gone');
       }
-      const vs=compile(gl.VERTEX_SHADER,vsSrc);
-      const fs=compile(gl.FRAGMENT_SHADER,fsSrc);
-      program=gl.createProgram();
-      gl.attachShader(program,vs);gl.attachShader(program,fs);gl.linkProgram(program);
-      if(!gl.getProgramParameter(program,gl.LINK_STATUS)){
-        console.error(gl.getProgramInfoLog(program));
-        throw new Error('link error');
-      }
-      gl.useProgram(program);
-      a_position=gl.getAttribLocation(program,'a_position');
-      u_camera   =gl.getUniformLocation(program,'u_camera');
-      u_resolution=gl.getUniformLocation(program,'u_resolution');
-      u_time     =gl.getUniformLocation(program,'u_time');
-      u_centerCount=gl.getUniformLocation(program,'u_centerCount');
-      u_centers  =gl.getUniformLocation(program,'u_centers');
-      u_strengths=gl.getUniformLocation(program,'u_strengths');
-
-      quadBuffer=gl.createBuffer();
-      gl.bindBuffer(gl.ARRAY_BUFFER,quadBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1, 1,-1, -1,1, 1,1]),gl.STATIC_DRAW);
-      gl.enableVertexAttribArray(a_position);
-      gl.vertexAttribPointer(a_position,2,gl.FLOAT,false,0,0);
-
-      cameraTexture=gl.createTexture();
-      gl.bindTexture(gl.TEXTURE_2D,cameraTexture);
-      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
-      gl.uniform1i(u_camera,0);
-
-      resize(); window.addEventListener('resize',resize);
+    } else {
+      if(now - st.lastSeen > 300) st.alive=false;
     }
-    function resize(){
-      const dpr=window.devicePixelRatio||1;
-      const w=canvas.clientWidth*dpr,h=canvas.clientHeight*dpr;
-      if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;}
-      gl.viewport(0,0,canvas.width,canvas.height);
-      gl.uniform2f(u_resolution,canvas.width,canvas.height);
-    }
+  }
+}
 
-    // Camera
-    async function startCamera(){
-      if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
-        alert('Camera API not available (use HTTPS + modern browser).');
-        return;
-      }
-      if(currentStream){currentStream.getTracks().forEach(t=>t.stop());currentStream=null;}
+// ── Lerp strength ───────────────────────────────────────────
+function updateStrengths(dt){
+  const inS=7, outS=3;
+  hands_state.forEach(st=>{
+    const target = st.alive ? 1 : 0;
+    const spd    = st.alive ? inS : outS;
+    st.strength += (target - st.strength) * Math.min(1, dt*spd);
+    st.strength  = Math.max(0, Math.min(1, st.strength));
+  });
+}
 
-      // IMPORTANT: simple constraints that work better on mobile
-      const constraints = {
-        audio:false,
-        video:{
-          facingMode: { ideal: facingMode }, // 'user' or 'environment'
-          width: { ideal: 1280 },
-          height:{ ideal: 720 }
-        }
-      };
-
-      try{
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
-        currentStream = stream;
-        video.srcObject = stream;
-        video.onloadedmetadata = async ()=>{
-          await video.play();
-          streaming = true;
-
-          // first guess: mirror front camera only, no rotation
-          mirrorVideo = (facingMode === 'user');
-          rotate180   = false;
-          applyVideoTransform();
-
-          if(!hands) initHands();
-
-          // tiny timeout so first frame exists, then detect upside‑down on desktop
-          setTimeout(detectUpsideDownOnce, 400);
-        };
-      }catch(e){
-        console.error(e);
-        alert('Could not start camera. Make sure you opened this over HTTPS and granted camera permission.');
+// ── Pack uniforms ────────────────────────────────────────────
+function packUniforms(){
+  let count=0;
+  for(let h=0;h<MAX_HANDS;h++){
+    const st=hands_state[h];
+    for(let j=0;j<LENS_PER;j++){
+      const gi=h*LENS_PER+j;
+      const s=st.strength;
+      if(s>0.001){
+        const c=st.centers[j]||[0.5,0.5];
+        centersFlat[gi*2+0]=c[0];
+        centersFlat[gi*2+1]=c[1];
+        strengthsFlat[gi]=s;
+        count=gi+1;
+      } else {
+        centersFlat[gi*2+0]=0;
+        centersFlat[gi*2+1]=0;
+        strengthsFlat[gi]=0;
       }
     }
+  }
+  gl.uniform1i(u_count, count);
+  gl.uniform2fv(u_centers, centersFlat);
+  gl.uniform1fv(u_str,     strengthsFlat);
+  gl.uniform2fv(u_vel,     velFlat);
+}
 
-    function applyVideoTransform(){
-      let t = '';
-      if(mirrorVideo) t += 'scaleX(-1) ';
-      if(rotate180)   t += 'rotate(180deg) ';
-      video.style.transform = t || 'none';
-    }
+// ── Render loop ──────────────────────────────────────────────
+let t0=null, tLast=null;
+function render(now){
+  requestAnimationFrame(render);
+  if(!gl||!streaming||vid.readyState<2) return;
+  if(!t0){ t0=now; tLast=now; }
 
-    function detectUpsideDownOnce(){
-      // Heuristic: on desktop, some webcams deliver 180° flipped;
-      // check device type and flip once if needed.
-      const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-      if(isMobile) return; // mobile usually correct; if wrong you can set rotate180=true manually
+  const elapsed = (now-t0)/1000;
+  const dt      = (now-tLast)/1000;
+  tLast=now;
 
-      // simple approach: if height < width and we are in portrait layout, flip
-      const v = video.videoWidth, h = video.videoHeight;
-      if(v > h && window.innerHeight > window.innerWidth){
-        rotate180 = !rotate180;
-        applyVideoTransform();
-      }
-    }
+  updateStrengths(dt);
 
-    flipBtn.addEventListener('click',()=>{
-      facingMode = (facingMode === 'user') ? 'environment' : 'user';
-      startCamera();
-    });
+  // Upload video frame
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, camTex);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,vid);
 
-    // MediaPipe
-    let hands=null, mpCamera=null;
-    const lensIndices=[8,12,16,20,4,7,11,15,0,9];
-    function initHands(){
-      hands=new Hands({
-        locateFile:file=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
-      });
-      hands.setOptions({
-        maxNumHands:MAX_HANDS,
-        modelComplexity:1,
-        minDetectionConfidence:0.6,
-        minTrackingConfidence:0.6
-      });
-      hands.onResults(onHandsResults);
-      mpCamera=new Camera(video,{
-        onFrame:async()=>{
-          if(!streaming)return;
-          await hands.send({image:video});
-        },
-        width:640,height:480
-      });
-      mpCamera.start();
-    }
+  gl.clearColor(0,0,0,1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
 
-    let firstHand=false;
-    function onHandsResults(results){
-      const now=performance.now();
-      const list=results.multiHandLandmarks||[];
-      for(let i=0;i<MAX_HANDS;i++){
-        const lm=list[i];
-        const state=handStates[i];
-        if(lm){
-          const centers=[];
-          for(let j=0;j<LENSES_PER_HAND;j++){
-            const idx=lensIndices[j],p=lm[idx];
-            let x=p.x,y=p.y;
-            if(mirrorVideo) x=1-x;      // because we mirrored the video
-            centers.push([x,y]);
-          }
-          state.centers=centers;
-          state.visible=true;
-          state.lastSeen=now;
-          if(!firstHand){
-            firstHand=true;
-            hint.classList.add('hidden');
-          }
-        }else{
-          if(now-state.lastSeen>250) state.visible=false;
-        }
-      }
-    }
+  gl.useProgram(prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER,quadBuf);
+  gl.enableVertexAttribArray(a_pos);
+  gl.vertexAttribPointer(a_pos,2,gl.FLOAT,false,0,0);
 
-    function updateStrengths(dt){
-      const inSpeed=6,outSpeed=3;
-      handStates.forEach(s=>{
-        const target=s.visible?1:0;
-        const speed=s.visible?inSpeed:outSpeed;
-        const delta=(target-s.strength)*Math.min(1,dt*speed);
-        s.strength=Math.max(0,Math.min(1,s.strength+delta));
-      });
-    }
-    function packCenters(){
-      let count=0;
-      for(let h=0;h<MAX_HANDS;h++){
-        const s=handStates[h];
-        for(let j=0;j<LENSES_PER_HAND;j++){
-          const gi=h*LENSES_PER_HAND+j;
-          if(s.strength>0.001){
-            const c=s.centers[j]||[0.5,0.5];
-            centersFlat[gi*2]=c[0];
-            centersFlat[gi*2+1]=c[1];
-            strengthsFlat[gi]=s.strength;
-            count=gi+1;
-          }else{
-            centersFlat[gi*2]=0;
-            centersFlat[gi*2+1]=0;
-            strengthsFlat[gi]=0;
-          }
-        }
-      }
-      gl.uniform1i(u_centerCount,count);
-      gl.uniform2fv(u_centers,centersFlat);
-      gl.uniform1fv(u_strengths,strengthsFlat);
-    }
+  gl.uniform1f(u_time, elapsed);
+  packUniforms();
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
 
-    let startTime=null,lastTime=null;
-    function render(nowMs){
-      requestAnimationFrame(render);
-      if(!gl||!streaming)return;
-      if(!startTime){startTime=nowMs;lastTime=nowMs;}
-      const t=(nowMs-startTime)/1000;
-      const dt=(nowMs-lastTime)/1000;
-      lastTime=nowMs;
+  updateAudio();
+}
 
-      updateStrengths(dt);
+// ── Audio ────────────────────────────────────────────────────
+let audioCtx=null, masterGain=null, voices=[];
 
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D,cameraTexture);
-      gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,video);
+function initAudio(){
+  if(audioCtx) return;
+  audioCtx = new(window.AudioContext||window.webkitAudioContext)();
+  masterGain = audioCtx.createGain();
+  masterGain.gain.value = 0;
+  masterGain.connect(audioCtx.destination);
 
-      gl.clearColor(0,0,0,0);
-      gl.clear(gl.COLOR_BUFFER_BIT);
-      gl.useProgram(program);
-      gl.bindBuffer(gl.ARRAY_BUFFER,quadBuffer);
-      gl.enableVertexAttribArray(a_position);
-      gl.vertexAttribPointer(a_position,2,gl.FLOAT,false,0,0);
-      gl.uniform1f(u_time,t);
-      packCenters();
-      gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+  for(let i=0;i<MAX_HANDS;i++){
+    const o1=audioCtx.createOscillator();
+    const o2=audioCtx.createOscillator();
+    const g =audioCtx.createGain();
+    const f =audioCtx.createBiquadFilter();
+    o1.type='sine'; o2.type='triangle';
+    o1.frequency.value=220; o2.frequency.value=330;
+    f.type='bandpass'; f.frequency.value=600; f.Q.value=4;
+    o1.connect(g); o2.connect(g); g.connect(f); f.connect(masterGain);
+    g.gain.value=0; o1.start(); o2.start();
+    voices.push({o1,o2,g,f});
+  }
+}
 
-      updateAudio();
-    }
+function updateAudio(){
+  if(!audioCtx||!masterGain) return;
+  let any=false;
+  const t=audioCtx.currentTime;
+  hands_state.forEach((st,i)=>{
+    const v=voices[i];
+    const palm=st.centers[8]||[0.5,0.5];
+    const y=1-palm[1];
+    const freq=200+900*y;
+    v.o1.frequency.setTargetAtTime(freq*.5,t,.06);
+    v.o2.frequency.setTargetAtTime(freq,t,.06);
+    v.f.frequency.setTargetAtTime(300+3000*st.strength,t,.09);
+    v.g.gain.setTargetAtTime(.55*st.strength,t,.07);
+    if(st.strength>.02) any=true;
+  });
+  masterGain.gain.setTargetAtTime(any?.85:0,t,.12);
+}
 
-    function startExperience(){
-      if(tapOverlay.style.display==='none')return;
-      tapOverlay.style.display='none';
-      initAudio();
-      initGL();
-      startCamera();
-      requestAnimationFrame(render);
-    }
+// ── Gate / start ─────────────────────────────────────────────
+function boot(){
+  if(gate.style.display==='none') return;
+  gate.style.display='none';
+  initAudio();
+  initGL();
+  startCamera();
+  requestAnimationFrame(render);
+}
+startB.addEventListener('click', boot);
+gate.addEventListener('click',   boot);
 
-    startBtn.addEventListener('click',startExperience);
-    tapOverlay.addEventListener('click',startExperience);
-    document.body.addEventListener('click',()=>{startExperience();},{once:true});
-  })();
-  </script>
+})();
+</script>
 </body>
 </html>
