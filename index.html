@@ -46,8 +46,7 @@ const vsSource = `
 attribute vec2 a_position;
 varying vec2 v_uv;
 void main() {
-  v_uv = a_position * 0.5 + 0.5;
-  v_uv.y = 1.0 - v_uv.y;
+  v_uv = a_position * 0.5 + 0.5;   // no vertical flip here
   gl_Position = vec4(a_position, 0.0, 1.0);
 }
 `;
@@ -59,7 +58,6 @@ uniform sampler2D u_camera;
 uniform vec2      u_joints[21];
 uniform float     u_depth;   // motion
 
-// distance to segment a-b
 float segDist(vec2 p, vec2 a, vec2 b) {
   vec2 pa = p - a;
   vec2 ba = b - a;
@@ -67,88 +65,73 @@ float segDist(vec2 p, vec2 a, vec2 b) {
   return length(pa - ba * h);
 }
 
-// build a soft "hand outline" by connecting key joints
+// Soft thick band around hand outline
 float handBorderMask(vec2 p) {
-  // approximate contour: thumb, index, middle, ring, pinky, edge of palm
-  int idx[10];
-  // thumb: 1-2-3-4
-  // index: 5-6-7-8
-  // middle: 9-10-11-12
-  // ring: 13-14-15-16
-  // pinky: 17-18-19-20
-  // plus side of palm: 0-17 and 0-5
   float minD = 1.0;
   vec2 a; vec2 b;
 
-  // thumb
+  // thumb 1-2-3-4
   a = u_joints[1]; b = u_joints[2]; minD = min(minD, segDist(p,a,b));
   a = u_joints[2]; b = u_joints[3]; minD = min(minD, segDist(p,a,b));
   a = u_joints[3]; b = u_joints[4]; minD = min(minD, segDist(p,a,b));
-  // index
+  // index 5-6-7-8
   a = u_joints[5]; b = u_joints[6]; minD = min(minD, segDist(p,a,b));
   a = u_joints[6]; b = u_joints[7]; minD = min(minD, segDist(p,a,b));
   a = u_joints[7]; b = u_joints[8]; minD = min(minD, segDist(p,a,b));
-  // middle
+  // middle 9-10-11-12
   a = u_joints[9];  b = u_joints[10]; minD = min(minD, segDist(p,a,b));
   a = u_joints[10]; b = u_joints[11]; minD = min(minD, segDist(p,a,b));
   a = u_joints[11]; b = u_joints[12]; minD = min(minD, segDist(p,a,b));
-  // ring
+  // ring 13-14-15-16
   a = u_joints[13]; b = u_joints[14]; minD = min(minD, segDist(p,a,b));
   a = u_joints[14]; b = u_joints[15]; minD = min(minD, segDist(p,a,b));
   a = u_joints[15]; b = u_joints[16]; minD = min(minD, segDist(p,a,b));
-  // pinky
+  // pinky 17-18-19-20
   a = u_joints[17]; b = u_joints[18]; minD = min(minD, segDist(p,a,b));
   a = u_joints[18]; b = u_joints[19]; minD = min(minD, segDist(p,a,b));
   a = u_joints[19]; b = u_joints[20]; minD = min(minD, segDist(p,a,b));
-  // palm edges
+  // palm edges 0-5 and 0-17
   a = u_joints[0]; b = u_joints[5];  minD = min(minD, segDist(p,a,b));
   a = u_joints[0]; b = u_joints[17]; minD = min(minD, segDist(p,a,b));
 
-  float borderWidth = 0.03;         // thickness of outline
-  float inner = smoothstep(borderWidth * 0.4, 0.0, minD);
-  float outer = smoothstep(borderWidth, borderWidth * 0.4, minD);
-  return inner * outer;             // band around the outline
+  float borderWidth = 0.06; // thicker rim
+  float inner = smoothstep(borderWidth * 0.7, 0.0, minD);
+  float outer = smoothstep(borderWidth, borderWidth * 0.7, minD);
+  return inner * outer;
 }
 
 void main() {
   vec2 uv = v_uv;
-
   vec3 base = texture2D(u_camera, uv).rgb;
 
-  // no motion => no effect
   if (u_depth <= 0.015) {
     gl_FragColor = vec4(base, 1.0);
     return;
   }
 
   float mask = handBorderMask(uv);
-
   if (mask <= 0.001) {
     gl_FragColor = vec4(base, 1.0);
     return;
   }
 
-  // direction roughly perpendicular to palm (wrist->middle knuckle)
+  // normal roughly perpendicular to palm
   vec2 wrist = u_joints[0];
   vec2 mid   = u_joints[9];
   vec2 normal = normalize(mid - wrist);
-  normal = vec2(-normal.y, normal.x); // rotate 90deg
+  normal = vec2(-normal.y, normal.x);
 
-  float strength = mask * (0.02 + u_depth * 0.03);
+  float strength = mask * (0.035 + u_depth * 0.05);
   vec2 offset = normal * strength;
-
-  // clamp offset
   offset = clamp(offset, vec2(-0.04), vec2(0.04));
 
-  // subtle glass refraction
   vec3 col;
   col.r = texture2D(u_camera, uv + offset * 1.01).r;
   col.g = texture2D(u_camera, uv + offset * 0.99).g;
   col.b = texture2D(u_camera, uv + offset * 0.97).b;
 
-  // slightly brighten inside border, like light catching glass edge
-  col = mix(base, col, mask * (0.6 + u_depth * 0.4));
-  col += vec3(mask * 0.15 * u_depth);
+  col = mix(base, col, mask * (0.8 + u_depth * 0.5));
+  col += vec3(mask * 0.25 * u_depth);
 
   gl_FragColor = vec4(col, 1.0);
 }
@@ -243,7 +226,7 @@ hands.onResults((results) => {
     prevLandmarks = smooth;
     handLandmarks = smooth;
   } else {
-    depthValue *= 0.8; // decay motion when no hand
+    depthValue *= 0.8;
   }
 });
 
@@ -270,7 +253,7 @@ function render() {
   for (let i = 0; i < 21; i++) {
     const lm = handLandmarks[i] || {x:-1,y:-1};
     joints[i*2]   = lm.x;
-    joints[i*2+1] = 1.0 - lm.y;
+    joints[i*2+1] = lm.y;   // no flip
   }
 
   gl.uniform1i(uCamera, 0);
