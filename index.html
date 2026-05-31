@@ -1,231 +1,95 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Reality Distortion AR</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Reality Distortion AR – Test</title>
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { background: #000; overflow: hidden; }
-    canvas { display: block; width: 100vw; height: 100vh; }
-    #video { display: none; }
+    html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#000; }
+    canvas { width:100%; height:100%; display:block; }
+    video { display:none; }
   </style>
 </head>
 <body>
 <video id="video" autoplay playsinline></video>
 <canvas id="canvas"></canvas>
-
-<!-- MediaPipe Hands -->
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
-
 <script>
-// ─── SETUP ───────────────────────────────────────────────────────────────────
-const video   = document.getElementById('video');
-const canvas  = document.getElementById('canvas');
-const gl      = canvas.getContext('webgl2') || canvas.getContext('webgl');
+const video  = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const gl     = canvas.getContext('webgl');
 
-canvas.width  = window.innerWidth;
-canvas.height = window.innerHeight;
-
-window.addEventListener('resize', () => {
-  canvas.width  = window.innerWidth;
-  canvas.height = window.innerHeight;
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width  = innerWidth  * dpr;
+  canvas.height = innerHeight * dpr;
   gl.viewport(0, 0, canvas.width, canvas.height);
-});
+}
+window.addEventListener('resize', resize);
+resize();
 
-// ─── SHADERS ─────────────────────────────────────────────────────────────────
-const vsSource = `
-  attribute vec2 a_position;
-  varying   vec2 v_uv;
-  void main() {
-    v_uv        = a_position * 0.5 + 0.5;
-    v_uv.y      = 1.0 - v_uv.y; // flip Y for camera
-    gl_Position = vec4(a_position, 0.0, 1.0);
-  }
-`;
+const vs = `
+attribute vec2 a_position;
+varying vec2 v_uv;
+void main() {
+  v_uv = a_position * 0.5 + 0.5;
+  v_uv.y = 1.0 - v_uv.y;
+  gl_Position = vec4(a_position, 0.0, 1.0);
+}`;
+const fs = `
+precision mediump float;
+varying vec2 v_uv;
+uniform sampler2D u_cam;
+void main() {
+  gl_FragColor = texture2D(u_cam, v_uv);
+}`;
 
-// The core distortion fragment shader
-const fsSource = `
-  precision highp float;
-  varying   vec2      v_uv;
-  uniform   sampler2D u_camera;   // live camera feed
-  uniform   vec2      u_joints[21]; // hand landmark positions (0..1)
-  uniform   float     u_depth;    // simulated hand depth
-  uniform   float     u_time;
-
-  // Chromatic-aberration-style displacement
-  vec2 distort(vec2 uv, vec2 center, float radius, float strength) {
-    vec2  delta = uv - center;
-    float dist  = length(delta);
-    float falloff = exp(-dist * dist / (2.0 * radius * radius));
-    // Swirling displacement: rotate delta by angle based on dist
-    float angle   = falloff * strength * 6.2831;
-    float cosA    = cos(angle);
-    float sinA    = sin(angle);
-    vec2  rotated = vec2(
-      cosA * delta.x - sinA * delta.y,
-      sinA * delta.x + cosA * delta.y
-    );
-    return center + rotated - delta; // displacement vector
-  }
-
-  void main() {
-    vec2 uv = v_uv;
-    vec2 totalDisp = vec2(0.0);
-
-    // Apply distortion from each finger tip + key joints
-    // Tips: 4(thumb), 8(index), 12(middle), 16(ring), 20(pinky)
-    // MCPs: 5, 9, 13, 17
-    int tips[9];
-    // Manually unroll — GLSL ES 1.0 doesn't allow dynamic indexing
-    float radius   = 0.08 + u_depth * 0.04; // bigger when hand is closer
-    float strength = 0.35 * u_depth;
-
-    totalDisp += distort(uv, u_joints[4],  radius, strength);
-    totalDisp += distort(uv, u_joints[8],  radius * 1.1, strength * 1.2);
-    totalDisp += distort(uv, u_joints[12], radius * 1.1, strength * 1.1);
-    totalDisp += distort(uv, u_joints[16], radius, strength);
-    totalDisp += distort(uv, u_joints[20], radius * 0.9, strength * 0.9);
-    totalDisp += distort(uv, u_joints[0],  radius * 1.3, strength * 0.6); // wrist
-    totalDisp += distort(uv, u_joints[9],  radius * 1.2, strength * 0.8); // palm
-
-    // Clamp displacement to avoid extreme warping
-    totalDisp = clamp(totalDisp, -0.15, 0.15);
-
-    vec2 uvR = uv + totalDisp * 1.0;
-    vec2 uvG = uv + totalDisp * 0.85; // chromatic aberration
-    vec2 uvB = uv + totalDisp * 0.70;
-
-    float r = texture2D(u_camera, uvR).r;
-    float g = texture2D(u_camera, uvG).g;
-    float b = texture2D(u_camera, uvB).b;
-
-    // Iridescent overlay near distortion center
-    float distortMag = length(totalDisp) * 8.0;
-    vec3  iridescence = vec3(
-      sin(distortMag * 3.0 + u_time * 2.0) * 0.5 + 0.5,
-      sin(distortMag * 4.5 + u_time * 2.5 + 2.094) * 0.5 + 0.5,
-      sin(distortMag * 6.0 + u_time * 3.0 + 4.188) * 0.5 + 0.5
-    );
-
-    vec3 base    = vec3(r, g, b);
-    vec3 final   = mix(base, iridescence, distortMag * 0.4);
-
-    gl_FragColor = vec4(final, 1.0);
-  }
-`;
-
-// ─── COMPILE SHADERS ─────────────────────────────────────────────────────────
-function compileShader(type, src) {
+function compile(type, src){
   const s = gl.createShader(type);
   gl.shaderSource(s, src);
   gl.compileShader(s);
-  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
-    console.error(gl.getShaderInfoLog(s));
   return s;
 }
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, vs));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fs));
+gl.linkProgram(prog);
+gl.useProgram(prog);
 
-const program = gl.createProgram();
-gl.attachShader(program, compileShader(gl.VERTEX_SHADER,   vsSource));
-gl.attachShader(program, compileShader(gl.FRAGMENT_SHADER, fsSource));
-gl.linkProgram(program);
-gl.useProgram(program);
-
-// ─── FULLSCREEN QUAD ─────────────────────────────────────────────────────────
-const quad = gl.createBuffer();
-gl.bindBuffer(gl.ARRAY_BUFFER, quad);
-gl.bufferData(gl.ARRAY_BUFFER,
-  new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
-const aPos = gl.getAttribLocation(program, 'a_position');
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+  -1,-1, 1,-1, -1,1, 1,1
+]), gl.STATIC_DRAW);
+const aPos = gl.getAttribLocation(prog, 'a_position');
 gl.enableVertexAttribArray(aPos);
 gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
 
-// ─── CAMERA TEXTURE ──────────────────────────────────────────────────────────
-const camTex = gl.createTexture();
-gl.bindTexture(gl.TEXTURE_2D, camTex);
+const tex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, tex);
 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+const uCam = gl.getUniformLocation(prog, 'u_cam');
 
-// ─── UNIFORM LOCATIONS ───────────────────────────────────────────────────────
-const uCamera = gl.getUniformLocation(program, 'u_camera');
-const uJoints = gl.getUniformLocation(program, 'u_joints');
-const uDepth  = gl.getUniformLocation(program, 'u_depth');
-const uTime   = gl.getUniformLocation(program, 'u_time');
-
-// ─── HAND LANDMARKS STATE ────────────────────────────────────────────────────
-let handLandmarks = new Array(21).fill(null).map(() => ({ x: -1, y: -1 }));
-let handDepth = 0.5;
-
-// ─── MEDIAPIPE HANDS SETUP ───────────────────────────────────────────────────
-const hands = new Hands({
-  locateFile: (file) =>
-    `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+navigator.mediaDevices.getUserMedia({
+  video: { facingMode: 'environment' }, audio:false
+}).then(stream => {
+  video.srcObject = stream;
+  video.onloadedmetadata = () => video.play();
 });
 
-hands.setOptions({
-  maxNumHands: 1,
-  modelComplexity: 1,
-  minDetectionConfidence: 0.7,
-  minTrackingConfidence: 0.6
-});
-
-hands.onResults((results) => {
-  if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-    const lm = results.multiHandLandmarks[0];
-    handLandmarks = lm;
-
-    // Simulate depth: distance between wrist(0) and middle MCP(9)
-    // Larger distance = hand closer to camera [web:43]
-    const wrist = lm[0], midMCP = lm[9];
-    const d = Math.hypot(wrist.x - midMCP.x, wrist.y - midMCP.y);
-    handDepth = THREE_MathUtils_mapLinear(d, 0.05, 0.3, 0.2, 1.5);
-  } else {
-    // No hand → fade depth to zero smoothly
-    handDepth *= 0.9;
+function loop(){
+  requestAnimationFrame(loop);
+  if (video.readyState >= 2) {
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA,
+                  gl.UNSIGNED_BYTE, video);
+    gl.uniform1i(uCam, 0);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
-});
-
-function THREE_MathUtils_mapLinear(x, a1, a2, b1, b2) {
-  return b1 + (x - a1) * (b2 - b1) / (a2 - a1);
 }
-
-// ─── START CAMERA ────────────────────────────────────────────────────────────
-const camera = new Camera(video, {
-  onFrame: async () => { await hands.send({ image: video }); },
-  width: 1280,
-  height: 720,
-  facingMode: 'environment' // rear camera on mobile
-});
-camera.start();
-
-// ─── RENDER LOOP ─────────────────────────────────────────────────────────────
-function render(timestamp) {
-  requestAnimationFrame(render);
-
-  // Upload camera frame to GPU
-  gl.bindTexture(gl.TEXTURE_2D, camTex);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
-
-  // Build flat [x0,y0, x1,y1 ... x20,y20] array for shader
-  const joints = new Float32Array(42);
-  for (let i = 0; i < 21; i++) {
-    const lm = handLandmarks[i] || { x: -1, y: -1 };
-    joints[i * 2]     = lm.x;        // MediaPipe: 0=left, 1=right
-    joints[i * 2 + 1] = 1.0 - lm.y; // flip Y to match UV space
-  }
-
-  gl.uniform1i(uCamera, 0);
-  gl.uniform2fv(uJoints, joints);
-  gl.uniform1f(uDepth, Math.max(0, handDepth));
-  gl.uniform1f(uTime, timestamp * 0.001);
-
-  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-}
-
-requestAnimationFrame(render);
+loop();
 </script>
 </body>
 </html>
