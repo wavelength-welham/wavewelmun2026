@@ -126,8 +126,8 @@
       float m  = u_flowMag;
 
       // gentle ripples
-      float wave = sin((uv.y + u_time*0.3)*40.0) * 0.003;
-      float wave2= sin((uv.x*0.8 - u_time*0.25)*30.0) * 0.002;
+      float wave  = sin((uv.y + u_time*0.3)*40.0) * 0.003;
+      float wave2 = sin((uv.x*0.8 - u_time*0.25)*30.0) * 0.002;
       vec2 ripple = vec2(wave2, wave);
 
       // total offset, scaled by areaMask so only region near palm moves
@@ -167,11 +167,12 @@
     let mirrorVideo = false;
     let streaming=false;
 
+    const MAX_HANDS = 1;   // <-- this was missing
     let lastPalm = null;
     let flow = {x:0,y:0};
     let flowMag = 0;
 
-    // simple audio (can be removed if you hate it)
+    // simple audio (optional)
     let audioCtx=null, gainNode=null;
     const noteScale = [220,247,262,294,330,392,440];
     let lastNoteTime=0;
