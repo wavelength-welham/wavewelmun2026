@@ -88,7 +88,7 @@
     }
   </script>
 
-  <!-- Fragment shader: liquid glass with blur -->
+  <!-- Fragment shader: liquid glass with blur and larger radius -->
   <script id="fs" type="x-shader/x-fragment">
     precision highp float;
     varying vec2 v_uv;
@@ -112,7 +112,7 @@
         vec2 c = u_centers[i];
         vec2 d = c - uv;
         float dist = length(d);
-        float radius = 0.25;
+        float radius = 0.35;          // larger radius for more area
         if(dist>radius)continue;
         float x = dist/radius;
         float fall = pow(1.0-x, 2.0);
@@ -127,7 +127,6 @@
     }
 
     vec3 sampleBlur(sampler2D tex, vec2 uv, vec2 offset, float blurAmount){
-      // simple 7‑tap blur along offset direction
       vec3 col = vec3(0.0);
       float wSum = 0.0;
       for(int i=-3;i<=3;i++){
@@ -147,6 +146,7 @@
       float field;
       vec2 dir = liquidField(uv, field);
 
+      // slightly stronger, motion‑dependent magnitude
       float mag = (0.03 + 0.10*u_camMotion) * field;
       vec2 offset = dir * mag;
 
@@ -157,8 +157,8 @@
 
       vec3 base = texture2D(u_camera, uv).rgb;
 
-      // blurred refracted color = liquid look
-      float blurAmount = 0.4 * field; // more blur where field is strong
+      // more blur for larger radius
+      float blurAmount = 0.6 * field;
       vec3 blurR = sampleBlur(u_camera, uvR, dir, blurAmount);
       vec3 blurG = sampleBlur(u_camera, uvG, dir, blurAmount);
       vec3 blurB = sampleBlur(u_camera, uvB, dir, blurAmount);
@@ -169,7 +169,6 @@
 
       vec3 color = mix(base, refr, glassAmount);
 
-      // subtle highlight
       float edge = smoothstep(0.2,0.8,glassAmount);
       color += vec3(edge*0.10);
 
@@ -373,7 +372,7 @@
         }
       }
 
-      // camera motion approx = movement of avg center
+      // camera/hand motion ≈ movement of average center
       let cx=0,cy=0,count=0;
       handStates.forEach(s=>{
         if(!s.visible)return;
@@ -385,16 +384,17 @@
           const dx=cx-lastCenter[0];
           const dy=cy-lastCenter[1];
           const d=Math.sqrt(dx*dx+dy*dy);
-          camMotion = camMotion*0.8 + Math.min(1.0,d*18.0)*0.2;
+          // slower decay -> longer‑lasting ripples
+          camMotion = camMotion*0.9 + Math.min(1.0,d*18.0)*0.25;
         }
         lastCenter=[cx,cy];
       }else{
-        camMotion*=0.9;
+        camMotion*=0.95;
       }
     }
 
     function updateStrengths(dt){
-      const inSpeed=6,outSpeed=3;
+      const inSpeed=5,outSpeed=2;
       handStates.forEach(s=>{
         const target=s.visible?1:0;
         const speed=s.visible?inSpeed:outSpeed;
@@ -437,7 +437,6 @@
       lastTime=nowMs;
 
       updateStrengths(dt);
-      camMotion*=0.96;
 
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D,cameraTexture);
