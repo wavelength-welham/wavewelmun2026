@@ -113,7 +113,7 @@
         vec2 c = u_centers[i];
         vec2 d = c - uv;
         float dist = length(d);
-        float radius = 0.35;          // wide influence
+        float radius = 0.20;          // smaller area around hand
         if(dist>radius)continue;
         float x = dist/radius;
         float fall = pow(1.0-x, 2.0);
@@ -158,11 +158,11 @@
       // no chromatic separation (keep it clean): just one UV
       vec3 base = texture2D(u_camera, uv).rgb;
 
-      float blurAmount = 0.6 * field + 0.3 * flowMag; // more blur with flow
+      float blurAmount = 0.25 * field + 0.15 * flowMag;
       vec3 refr = sampleBlur(u_camera, uv + offset, flowDir, blurAmount);
 
-      float glassAmount = clamp(field*u_camMotion + flowMag*0.6,0.0,1.0);
-      glassAmount *= 0.9;
+     float glassAmount = clamp(field*u_camMotion + flowMag*0.4,0.0,1.0);
+glassAmount *= 0.6;
 
       vec3 color = mix(base, refr, glassAmount);
 
