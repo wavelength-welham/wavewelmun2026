@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Reality Distortion AR – Liquid Glass</title>
+  <title>Reality Distortion AR – Liquid Glass Flow</title>
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
   <style>
     html,body{
@@ -67,7 +67,7 @@
     <canvas id="glcanvas"></canvas>
 
     <div id="ui">
-      <div id="hint">Swipe your hand to ripple reality</div>
+      <div id="hint">Swipe your hand to push the liquid</div>
       <div id="controls">
         <button id="flipBtn">Flip Camera</button>
       </div>
@@ -88,7 +88,7 @@
     }
   </script>
 
-  <!-- Fragment shader: liquid glass with blur and larger radius -->
+  <!-- Fragment shader: liquid glass + global flow -->
   <script id="fs" type="x-shader/x-fragment">
     precision highp float;
     varying vec2 v_uv;
@@ -100,8 +100,9 @@
     uniform vec2  u_centers[MAX_CENTERS];
     uniform float u_strengths[MAX_CENTERS];
     uniform float u_camMotion;
+    uniform vec2  u_flow;      // global flow direction from hand motion
 
-    // smooth liquid field
+    // smooth liquid field around hand
     vec2 liquidField(vec2 uv,out float fieldStrength){
       vec2 accum = vec2(0.0);
       float total = 0.0;
@@ -112,7 +113,7 @@
         vec2 c = u_centers[i];
         vec2 d = c - uv;
         float dist = length(d);
-        float radius = 0.35;          // larger radius for more area
+        float radius = 0.35;          // wide influence
         if(dist>radius)continue;
         float x = dist/radius;
         float fall = pow(1.0-x, 2.0);
@@ -140,15 +141,19 @@
     }
 
     void main(){
-      // flip Y to correct camera orientation
+      // flip Y → camera upright
       vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);
 
       float field;
       vec2 dir = liquidField(uv, field);
 
-      // slightly stronger, motion‑dependent magnitude
+      // combine local pull with global flow
+      vec2 flowDir = normalize(u_flow + dir * 0.8 + 1e-6);
+      float flowMag = length(u_flow);
+
       float mag = (0.03 + 0.10*u_camMotion) * field;
-      vec2 offset = dir * mag;
+      mag += 0.035 * flowMag;     // extra displacement from overall flow
+      vec2 offset = flowDir * mag;
 
       float ab = 0.006;
       vec2 uvR = clamp(uv + offset*(1.0+ab),0.001,0.999);
@@ -157,14 +162,13 @@
 
       vec3 base = texture2D(u_camera, uv).rgb;
 
-      // more blur for larger radius
-      float blurAmount = 0.6 * field;
-      vec3 blurR = sampleBlur(u_camera, uvR, dir, blurAmount);
-      vec3 blurG = sampleBlur(u_camera, uvG, dir, blurAmount);
-      vec3 blurB = sampleBlur(u_camera, uvB, dir, blurAmount);
+      float blurAmount = 0.6 * field + 0.3 * flowMag; // more blur with flow
+      vec3 blurR = sampleBlur(u_camera, uvR, flowDir, blurAmount);
+      vec3 blurG = sampleBlur(u_camera, uvG, flowDir, blurAmount);
+      vec3 blurB = sampleBlur(u_camera, uvB, flowDir, blurAmount);
       vec3 refr = vec3(blurR.r, blurG.g, blurB.b);
 
-      float glassAmount = clamp(field*u_camMotion,0.0,1.0);
+      float glassAmount = clamp(field*u_camMotion + flowMag*0.6,0.0,1.0);
       glassAmount *= 0.9;
 
       vec3 color = mix(base, refr, glassAmount);
@@ -189,7 +193,7 @@
     const startBtn   = document.getElementById('startBtn');
 
     let gl, program;
-    let a_position,u_camera,u_time,u_centerCount,u_centers,u_strengths,u_camMotion;
+    let a_position,u_camera,u_time,u_centerCount,u_centers,u_strengths,u_camMotion,u_flow;
     let quadBuffer,cameraTexture;
 
     let facingMode = 'environment';
@@ -207,8 +211,9 @@
 
     let lastCenter = null;
     let camMotion  = 0;
+    let flow       = {x:0,y:0};  // global liquid flow vector
 
-    // Audio: rhythmic notes
+    // Audio same as before
     let audioCtx=null, gainNode=null;
     const noteScale = [220,247,262,294,330,392,440];
     let lastNoteTime=0;
@@ -277,6 +282,7 @@
       u_centers     = gl.getUniformLocation(program,'u_centers');
       u_strengths   = gl.getUniformLocation(program,'u_strengths');
       u_camMotion   = gl.getUniformLocation(program,'u_camMotion');
+      u_flow        = gl.getUniformLocation(program,'u_flow');
 
       quadBuffer = gl.createBuffer();
       gl.bindBuffer(gl.ARRAY_BUFFER,quadBuffer);
@@ -372,7 +378,7 @@
         }
       }
 
-      // camera/hand motion ≈ movement of average center
+      // camera/hand motion + flow: movement of average center
       let cx=0,cy=0,count=0;
       handStates.forEach(s=>{
         if(!s.visible)return;
@@ -384,12 +390,19 @@
           const dx=cx-lastCenter[0];
           const dy=cy-lastCenter[1];
           const d=Math.sqrt(dx*dx+dy*dy);
-          // slower decay -> longer‑lasting ripples
+
+          // camMotion just for intensity
           camMotion = camMotion*0.9 + Math.min(1.0,d*18.0)*0.25;
+
+          // global flow vector → direction liquid keeps moving
+          flow.x = flow.x*0.9 + dx*1.8;
+          flow.y = flow.y*0.9 + dy*1.8;
         }
         lastCenter=[cx,cy];
       }else{
-        camMotion*=0.95;
+        camMotion*=0.96;
+        flow.x *= 0.95;
+        flow.y *= 0.95;
       }
     }
 
@@ -450,10 +463,12 @@
       gl.vertexAttribPointer(a_position,2,gl.FLOAT,false,0,0);
       gl.uniform1f(u_time,t);
       gl.uniform1f(u_camMotion,camMotion);
+      gl.uniform2f(u_flow,flow.x,flow.y);
       packCenters();
       gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
 
-      updateAudio(Math.max(camMotion,0));
+      const globalStrength = Math.max(Math.min(Math.sqrt(flow.x*flow.x+flow.y*flow.y)*4.0,1.0),0.0);
+      updateAudio(globalStrength);
     }
 
     function startExperience(){
