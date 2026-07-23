@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Reality Distortion AR – Liquid Glass Flow</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+  <style>
+    html,body{
+      margin:0;padding:0;width:100%;height:100%;
+      overflow:hidden;background:#000;
+      font-family:system-ui,-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;
+      touch-action:none;-webkit-user-select:none;user-select:none;
+    }
+    #app{position:fixed;inset:0;overflow:hidden;background:#000;}
+
+    video#camera{
+      position:absolute;inset:0;width:100%;height:100%;
+      object-fit:cover;
+      transform-origin:center center;
+      background:#000;
+    }
+    canvas#glcanvas{
+      position:absolute;inset:0;width:100%;height:100%;
+      pointer-events:none;
+    }
+
+    #ui{position:absolute;inset:0;pointer-events:none;}
+    #controls{
+      position:absolute;right:12px;bottom:12px;
+      display:flex;flex-direction:column;gap:8px;
+      pointer-events:auto;
+    }
+    button{
+      border:none;border-radius:999px;
+      padding:10px 16px;
+      background:rgba(0,0,0,0.55);color:#fff;
+      font-size:14px;letter-spacing:0.03em;text-transform:uppercase;
+      backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+    }
+    button:active{background:rgba(255,255,255,0.18);}
+
+    #hint{
+      position:absolute;left:50%;bottom:18%;
+      transform:translateX(-50%);
+      color:#fff;font-size:15px;
+      padding:10px 16px;border-radius:999px;
+      background:rgba(0,0,0,0.55);
+      backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+      opacity:1;transition:opacity .6s ease;
+      pointer-events:none;white-space:nowrap;
+    }
+    #hint.hidden{opacity:0;}
+
+    #tapStart{
+      position:absolute;inset:0;
+      background:rgba(0,0,0,0.8);color:#fff;
+      display:flex;align-items:center;justify-content:center;
+      flex-direction:column;text-align:center;
+      z-index:10;pointer-events:auto;
+    }
+    #tapStart button{margin-top:16px;background:#fff;color:#000;}
+  </style>
+</head>
+<body>
+  <div id="app">
+    <video id="camera" playsinline muted></video>
+    <canvas id="glcanvas"></canvas>
+
+    <div id="ui">
+      <div id="hint">Swipe your hand to push the liquid</div>
+      <div id="controls">
+        <button id="flipBtn">Flip Camera</button>
+      </div>
+      <div id="tapStart">
+        <div>Tap to enable camera &amp; audio</div>
+        <button id="startBtn">Start</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Vertex shader -->
+  <script id="vs" type="x-shader/x-vertex">
+    attribute vec2 a_position;
+    varying vec2 v_uv;
+    void main(){
+      v_uv = a_position*0.5+0.5;
+      gl_Position = vec4(a_position,0.0,1.0);
+    }
+  </script>
+
+  <!-- Fragment shader: liquid glass + global flow -->
+  <script id="fs" type="x-shader/x-fragment">
+    precision highp float;
+    varying vec2 v_uv;
+    uniform sampler2D u_camera;
+    uniform float u_time;
+
+    const int MAX_CENTERS = 20;
+    uniform int   u_centerCount;
+    uniform vec2  u_centers[MAX_CENTERS];
+    uniform float u_strengths[MAX_CENTERS];
+    uniform float u_camMotion;
+    uniform vec2  u_flow;      // global flow direction from hand motion
+
+    // smooth liquid field around hand
+    vec2 liquidField(vec2 uv,out float fieldStrength){
+      vec2 accum = vec2(0.0);
+      float total = 0.0;
+      for(int i=0;i<MAX_CENTERS;i++){
+        if(i>=u_centerCount)break;
+        float s = u_strengths[i];
+        if(s<=0.001)continue;
+        vec2 c = u_centers[i];
+        vec2 d = c - uv;
+        float dist = length(d);
+        float radius = 0.35;          // wide influence
+        if(dist>radius)continue;
+        float x = dist/radius;
+        float fall = pow(1.0-x, 2.0);
+        float influence = fall * s;
+        vec2 dir = dist>1e-4 ? normalize(d) : vec2(0.0);
+        accum += dir * influence;
+        total += influence;
+      }
+      if(total>0.0) accum /= total;
+      fieldStrength = clamp(total,0.0,1.0);
+      return accum;
+    }
+
+    vec3 sampleBlur(sampler2D tex, vec2 uv, vec2 offset, float blurAmount){
+      vec3 col = vec3(0.0);
+      float wSum = 0.0;
+      for(int i=-3;i<=3;i++){
+        float w = 1.0 - abs(float(i))/3.0;
+        vec2 u = uv + offset * blurAmount * float(i);
+        u = clamp(u,0.001,0.999);
+        col += texture2D(tex,u).rgb * w;
+        wSum += w;
+      }
+      return col / wSum;
+    }
+
+    void main(){
+      // flip Y → camera upright
+      vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);
+
+      float field;
+      vec2 dir = liquidField(uv, field);
+
+      // combine local pull with global flow
+      vec2 flowDir = normalize(u_flow + dir * 0.8 + 1e-6);
+      float flowMag = length(u_flow);
+
+      float mag = (0.03 + 0.10*u_camMotion) * field;
+      mag += 0.035 * flowMag;     // extra displacement from overall flow
+      vec2 offset = flowDir * mag;
+
+      // no chromatic separation (keep it clean): just one UV
+      vec3 base = texture2D(u_camera, uv).rgb;
+
+      float blurAmount = 0.6 * field + 0.3 * flowMag; // more blur with flow
+      vec3 refr = sampleBlur(u_camera, uv + offset, flowDir, blurAmount);
+
+      float glassAmount = clamp(field*u_camMotion + flowMag*0.6,0.0,1.0);
+      glassAmount *= 0.9;
+
+      vec3 color = mix(base, refr, glassAmount);
+
+      float edge = smoothstep(0.2,0.8,glassAmount);
+      color += vec3(edge*0.10);
+
+      gl_FragColor = vec4(color,1.0);
+    }
+  </script>
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+
+  <script>
+  (function(){
+    const video      = document.getElementById('camera');
+    const canvas     = document.getElementById('glcanvas');
+    const flipBtn    = document.getElementById('flipBtn');
+    const hint       = document.getElementById('hint');
+    const tapOverlay = document.getElementById('tapStart');
+    const startBtn   = document.getElementById('startBtn');
+
+    let gl, program;
+    let a_position,u_camera,u_time,u_centerCount,u_centers,u_strengths,u_camMotion,u_flow;
+    let quadBuffer,cameraTexture;
+
+    let facingMode = 'environment';
+    let mirrorVideo = false;
+    let streaming=false;
+
+    const MAX_HANDS=2, LENSES_PER_HAND=10, MAX_CENTERS=MAX_HANDS*LENSES_PER_HAND;
+    const handStates=[];
+    for(let i=0;i<MAX_HANDS;i++){
+      handStates.push({visible:false,strength:0,lastSeen:0,
+                       centers:new Array(LENSES_PER_HAND).fill([0.5,0.5])});
+    }
+    const centersFlat   = new Float32Array(MAX_CENTERS*2);
+    const strengthsFlat = new Float32Array(MAX_CENTERS);
+
+    let lastCenter = null;
+    let camMotion  = 0;
+    let flow       = {x:0,y:0};  // global liquid flow vector
+
+    // Audio same as before
+    let audioCtx=null, gainNode=null;
+    const noteScale = [220,247,262,294,330,392,440];
+    let lastNoteTime=0;
+
+    function initAudio(){
+      if(audioCtx)return;
+      audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+      gainNode=audioCtx.createGain();
+      gainNode.gain.value=0;
+      gainNode.connect(audioCtx.destination);
+    }
+
+    function playNote(strength){
+      if(!audioCtx)return;
+      const now=audioCtx.currentTime;
+      if(now-lastNoteTime<0.09)return;
+      lastNoteTime=now;
+      const osc=audioCtx.createOscillator();
+      const g=audioCtx.createGain();
+      const idx=Math.floor(Math.random()*noteScale.length);
+      const base=noteScale[idx];
+      osc.type='triangle';
+      osc.frequency.value=base+strength*180;
+      osc.connect(g).connect(gainNode);
+      g.gain.value=0;
+      osc.start(now);
+      g.gain.linearRampToValueAtTime(0.25*strength,now+0.03);
+      g.gain.linearRampToValueAtTime(0.0,now+0.20);
+      osc.stop(now+0.22);
+    }
+
+    function updateAudio(globalStrength){
+      if(!audioCtx)return;
+      const now=audioCtx.currentTime;
+      gainNode.gain.linearRampToValueAtTime(0.5*globalStrength,now+0.05);
+      if(globalStrength>0.2) playNote(globalStrength);
+    }
+
+    function initGL(){
+      gl=canvas.getContext('webgl',{alpha:true,antialias:true});
+      if(!gl){alert('WebGL not supported');return;}
+      const vsSrc=document.getElementById('vs').textContent.trim();
+      const fsSrc=document.getElementById('fs').textContent.trim();
+      function compile(t,s){
+        const sh=gl.createShader(t);
+        gl.shaderSource(sh,s);gl.compileShader(sh);
+        if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS)){
+          console.error(gl.getShaderInfoLog(sh));
+          throw new Error('shader error');
+        }
+        return sh;
+      }
+      const vs=compile(gl.VERTEX_SHADER,vsSrc);
+      const fs=compile(gl.FRAGMENT_SHADER,fsSrc);
+      program=gl.createProgram();
+      gl.attachShader(program,vs);gl.attachShader(program,fs);gl.linkProgram(program);
+      if(!gl.getProgramParameter(program,gl.LINK_STATUS)){
+        console.error(gl.getProgramInfoLog(program));
+        throw new Error('link error');
+      }
+      gl.useProgram(program);
+      a_position    = gl.getAttribLocation(program,'a_position');
+      u_camera      = gl.getUniformLocation(program,'u_camera');
+      u_time        = gl.getUniformLocation(program,'u_time');
+      u_centerCount = gl.getUniformLocation(program,'u_centerCount');
+      u_centers     = gl.getUniformLocation(program,'u_centers');
+      u_strengths   = gl.getUniformLocation(program,'u_strengths');
+      u_camMotion   = gl.getUniformLocation(program,'u_camMotion');
+      u_flow        = gl.getUniformLocation(program,'u_flow');
+
+      quadBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER,quadBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1, 1,-1, -1,1, 1,1]),gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(a_position);
+      gl.vertexAttribPointer(a_position,2,gl.FLOAT,false,0,0);
+
+      cameraTexture=gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D,cameraTexture);
+      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+      gl.uniform1i(u_camera,0);
+
+      resize();
+      window.addEventListener('resize',resize);
+    }
+    function resize(){
+      const dpr=window.devicePixelRatio||1;
+      const w=canvas.clientWidth*dpr,h=canvas.clientHeight*dpr;
+      if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;}
+      gl.viewport(0,0,canvas.width,canvas.height);
+    }
+
+    let hands=null, mpCamera=null;
+    const lensIndices=[8,12,16,20,4,7,11,15,0,9];
+
+    async function startCameraAndHands(){
+      if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
+        alert('Camera API not available (HTTPS + modern browser required).');
+        return;
+      }
+
+      hands=new Hands({
+        locateFile:file=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+      });
+      hands.setOptions({
+        maxNumHands:MAX_HANDS,
+        modelComplexity:1,
+        minDetectionConfidence:0.6,
+        minTrackingConfidence:0.6
+      });
+      hands.onResults(onHandsResults);
+
+      mpCamera=new Camera(video,{
+        onFrame:async()=>{ await hands.send({image:video}); },
+        width:1280,height:720,facingMode:facingMode
+      });
+      await mpCamera.start();
+      streaming=true;
+
+      mirrorVideo = (facingMode === 'user');
+      applyVideoTransform();
+    }
+
+    function applyVideoTransform(){
+      let t='';
+      if(mirrorVideo) t+='scaleX(-1) ';
+      video.style.transform=t||'none';
+    }
+
+    flipBtn.addEventListener('click',()=>{
+      facingMode = (facingMode === 'user') ? 'environment' : 'user';
+      if(mpCamera){ mpCamera.stop(); mpCamera=null; }
+      startCameraAndHands();
+    });
+
+    let firstHand=false;
+    function onHandsResults(results){
+      const now=performance.now();
+      const list=results.multiHandLandmarks||[];
+      for(let i=0;i<MAX_HANDS;i++){
+        const lm=list[i];
+        const state=handStates[i];
+        if(lm){
+          const centers=[];
+          for(let j=0;j<LENSES_PER_HAND;j++){
+            const idx=lensIndices[j],p=lm[idx];
+            let x=p.x,y=p.y;
+            if(mirrorVideo) x=1-x;
+            centers.push([x,y]);
+          }
+          state.centers=centers;
+          state.visible=true;
+          state.lastSeen=now;
+          if(!firstHand){
+            firstHand=true;
+            hint.classList.add('hidden');
+          }
+        }else{
+          if(now-state.lastSeen>250) state.visible=false;
+        }
+      }
+
+      // camera/hand motion + flow: movement of average center
+      let cx=0,cy=0,count=0;
+      handStates.forEach(s=>{
+        if(!s.visible)return;
+        s.centers.forEach(c=>{cx+=c[0];cy+=c[1];count++;});
+      });
+      if(count>0){
+        cx/=count; cy/=count;
+        if(lastCenter){
+          const dx=cx-lastCenter[0];
+          const dy=cy-lastCenter[1];
+          const d=Math.sqrt(dx*dx+dy*dy);
+
+          // camMotion just for intensity
+          camMotion = camMotion*0.9 + Math.min(1.0,d*18.0)*0.25;
+
+          // global flow vector → direction liquid keeps moving
+          flow.x = flow.x*0.9 + dx*1.8;
+          flow.y = flow.y*0.9 + dy*1.8;
+        }
+        lastCenter=[cx,cy];
+      }else{
+        camMotion*=0.96;
+        flow.x *= 0.95;
+        flow.y *= 0.95;
+      }
+    }
+
+    function updateStrengths(dt){
+      const inSpeed=5,outSpeed=2;
+      handStates.forEach(s=>{
+        const target=s.visible?1:0;
+        const speed=s.visible?inSpeed:outSpeed;
+        const delta=(target-s.strength)*Math.min(1,dt*speed);
+        s.strength=Math.max(0,Math.min(1,s.strength+delta));
+      });
+    }
+
+    function packCenters(){
+      let count=0;
+      for(let h=0;h<MAX_HANDS;h++){
+        const s=handStates[h];
+        for(let j=0;j<LENSES_PER_HAND;j++){
+          const gi=h*LENSES_PER_HAND+j;
+          if(s.strength>0.001){
+            const c=s.centers[j]||[0.5,0.5];
+            centersFlat[gi*2]   = c[0];
+            centersFlat[gi*2+1] = c[1];
+            strengthsFlat[gi]   = s.strength;
+            count = gi+1;
+          }else{
+            centersFlat[gi*2]   = 0;
+            centersFlat[gi*2+1] = 0;
+            strengthsFlat[gi]   = 0;
+          }
+        }
+      }
+      gl.uniform1i(u_centerCount,count);
+      gl.uniform2fv(u_centers,centersFlat);
+      gl.uniform1fv(u_strengths,strengthsFlat);
+    }
+
+    let startTime=null,lastTime=null;
+    function render(nowMs){
+      requestAnimationFrame(render);
+      if(!gl||!streaming)return;
+      if(!startTime){startTime=nowMs;lastTime=nowMs;}
+      const t =(nowMs-startTime)/1000;
+      const dt=(nowMs-lastTime)/1000;
+      lastTime=nowMs;
+
+      updateStrengths(dt);
+
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D,cameraTexture);
+      gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,video);
+
+      gl.clearColor(0,0,0,0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.useProgram(program);
+      gl.bindBuffer(gl.ARRAY_BUFFER,quadBuffer);
+      gl.enableVertexAttribArray(a_position);
+      gl.vertexAttribPointer(a_position,2,gl.FLOAT,false,0,0);
+      gl.uniform1f(u_time,t);
+      gl.uniform1f(u_camMotion,camMotion);
+      gl.uniform2f(u_flow,flow.x,flow.y);
+      packCenters();
+      gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+
+      const globalStrength = Math.max(Math.min(Math.sqrt(flow.x*flow.x+flow.y*flow.y)*4.0,1.0),0.0);
+      updateAudio(globalStrength);
+    }
+
+    function startExperience(){
+      if(tapOverlay.style.display==='none')return;
+      tapOverlay.style.display='none';
+      initAudio();
+      initGL();
+      startCameraAndHands();
+      requestAnimationFrame(render);
+    }
+
+    startBtn.addEventListener('click',startExperience);
+    tapOverlay.addEventListener('click',startExperience);
+    document.body.addEventListener('click',()=>{startExperience();},{once:true});
+  })();
+  </script>
+</body>
+</html>
